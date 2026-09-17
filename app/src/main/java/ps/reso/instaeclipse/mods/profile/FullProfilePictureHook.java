@@ -45,12 +45,15 @@ public final class FullProfilePictureHook {
                 Canvas canvas = (Canvas) p.args[0];
                 Rect oldBounds = new Rect(image.getBounds());
                 int saved = canvas.save();
+                Drawable.Callback callback = image.getCallback();
                 try {
                     float scale = Math.min((float) width / image.getIntrinsicWidth(), (float) height / image.getIntrinsicHeight());
                     float w = image.getIntrinsicWidth() * scale, h = image.getIntrinsicHeight() * scale;
                     canvas.translate(view.getPaddingLeft() + (width - w) / 2,
                             view.getPaddingTop() + (height - h) / 2);
                     canvas.scale(scale, scale);
+                    // Bounds changes must not schedule another frame on every draw.
+                    image.setCallback(null);
                     image.setBounds(0, 0, image.getIntrinsicWidth(), image.getIntrinsicHeight());
                     image.draw(canvas);
                     if (!originalOutline.containsKey(view)) originalOutline.put(view, view.getClipToOutline());
@@ -60,6 +63,7 @@ public final class FullProfilePictureHook {
                     // Let Instagram draw normally if its drawable is incompatible.
                 } finally {
                     image.setBounds(oldBounds);
+                    image.setCallback(callback);
                     canvas.restoreToCount(saved);
                 }
             }

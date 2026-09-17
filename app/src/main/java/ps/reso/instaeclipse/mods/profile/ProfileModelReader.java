@@ -20,10 +20,22 @@ final class ProfileModelReader {
         for (String key : new String[]{"followed_by", "following", "friendship_status", "username"}) {
             List<Method> methods = new ArrayList<>();
             try {
-                for (MethodData data : bridge.findMethod(FindMethod.create().matcher(
-                        MethodMatcher.create().usingStrings(key).paramCount(0)))) {
-                    Method method = data.getMethodInstance(loader);
-                    if (!Modifier.isStatic(method.getModifiers())) methods.add(method);
+                List<MethodData> found = new ArrayList<>(bridge.findMethod(FindMethod.create().matcher(
+                        MethodMatcher.create().usingEqStrings(key).paramCount(0))));
+                // Recent Pando models use the fixed Java hash of the field name instead
+                // of the field string (the upstream username resolver uses the same scheme).
+                found.addAll(bridge.findMethod(FindMethod.create().matcher(
+                        MethodMatcher.create().usingNumbers(key.hashCode()).paramCount(0))));
+                for (MethodData data : found) {
+                    try {
+                        Method method = data.getMethodInstance(loader);
+                        Class<?> result = method.getReturnType();
+                        if (Modifier.isStatic(method.getModifiers()) || methods.contains(method)) continue;
+                        if ((key.equals("following") || key.equals("followed_by"))
+                                && result != boolean.class && result != Boolean.class) continue;
+                        if (key.equals("username") && result != String.class) continue;
+                        methods.add(method);
+                    } catch (Throwable ignored) { }
                 }
             } catch (Throwable ignored) { }
             getters.put(key, methods);
@@ -32,19 +44,31 @@ final class ProfileModelReader {
 
     Object read(Object model, String key, String... namedGetters) {
         if (model == null) return null;
+        if (key.equals("username")) {
+            Method resolved = ps.reso.instaeclipse.utils.users.UserUtils.userUsernameGetter;
+            if (resolved != null && resolved.getDeclaringClass().isInstance(model)) {
+                try {
+                    Object value = resolved.invoke(model);
+                    if (value instanceof String) return value;
+                } catch (Throwable ignored) { }
+            }
+        }
         for (String name : namedGetters) {
             Object value = invoke(model, name);
             if (value != null) return value;
         }
+        Object result = null;
         for (Method candidate : getters.getOrDefault(key, java.util.Collections.emptyList())) {
             // Pando and POJO implementations share an interface, but not a superclass.
             // Only transfer a getter name when both implement that exact interface.
             if (candidate.getDeclaringClass().isInstance(model) || sharesAccessor(model, candidate)) {
                 Object value = invoke(model, candidate.getName());
-                if (value != null) return value;
+                if (value == null) continue;
+                if (result != null && !result.equals(value)) return null;
+                result = value;
             }
         }
-        return null;
+        return result;
     }
 
     private static boolean sharesAccessor(Object model, Method candidate) {
