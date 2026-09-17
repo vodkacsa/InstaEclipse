@@ -8,6 +8,8 @@ import android.widget.ImageView;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
@@ -18,6 +20,7 @@ import ps.reso.instaeclipse.utils.feature.FeatureStatusTracker;
 
 /** Render the original image drawable fitted inside the view, without the circular mask. */
 public final class FullProfilePictureHook {
+    private static final Map<View, Boolean> originalOutline = new WeakHashMap<>();
     private static final Set<Integer> profileIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private static final Set<Integer> otherIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
@@ -26,9 +29,14 @@ public final class FullProfilePictureHook {
         Method draw = XposedHelpers.findMethodExact(circular, "onDraw", Canvas.class);
         XposedBridge.hookMethod(draw, new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam p) {
-                if (!FeatureFlags.fullProfilePictures || !(p.thisObject instanceof ImageView)) return;
+                if (!(p.thisObject instanceof ImageView)) return;
                 ImageView view = (ImageView) p.thisObject;
                 if (!isProfilePicture(view)) return;
+                if (!FeatureFlags.fullProfilePictures) {
+                    Boolean outline = originalOutline.remove(view);
+                    if (outline != null) view.setClipToOutline(outline);
+                    return;
+                }
                 Drawable image = view.getDrawable();
                 if (image == null || image.getIntrinsicWidth() <= 0 || image.getIntrinsicHeight() <= 0) return;
                 int width = view.getWidth() - view.getPaddingLeft() - view.getPaddingRight();
@@ -45,6 +53,8 @@ public final class FullProfilePictureHook {
                     canvas.scale(scale, scale);
                     image.setBounds(0, 0, image.getIntrinsicWidth(), image.getIntrinsicHeight());
                     image.draw(canvas);
+                    if (!originalOutline.containsKey(view)) originalOutline.put(view, view.getClipToOutline());
+                    if (view.getClipToOutline()) view.setClipToOutline(false);
                     p.setResult(null); // Skip only this avatar's circular onDraw, not other images.
                 } catch (Throwable ignored) {
                     // Let Instagram draw normally if its drawable is incompatible.

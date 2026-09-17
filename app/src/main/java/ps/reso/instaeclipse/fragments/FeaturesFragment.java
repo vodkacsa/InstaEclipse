@@ -1252,7 +1252,7 @@ public class FeaturesFragment extends Fragment {
     // =========================================================
 
     private void stageChange(String prefKey, boolean isChecked) {
-        if (localCache.getBoolean(prefKey, false) == isChecked) {
+        if (localCache.getBoolean(prefKey, prefKey.equals("fullProfilePictures") || prefKey.equals("showProfileRelationship")) == isChecked) {
             stagedChanges.remove(prefKey);
         } else {
             stagedChanges.put(prefKey, isChecked);
