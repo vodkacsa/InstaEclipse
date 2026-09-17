@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="profile_full_pictures">Teljes profilképek</string>
+    <string name="profile_relationship">Követési kapcsolat a profilon</string>
+    <string name="profile_relationship_friends">Barátok · kölcsönös követés</string>
+    <string name="profile_relationship_follows_you">Követ téged</string>
+    <string name="profile_relationship_following">Te követed őt</string>
+    <string name="profile_relationship_neither">Nem követ téged</string>
+    <string name="profile_relationship_unknown">A követési állapot nem érhető el</string>
+</resources>

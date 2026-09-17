@@ -61,6 +61,10 @@ public class FeatureFlags {
     public static boolean isAnalyticsBlocked = false;
     public static boolean disableTrackingLinks = false;
 
+    // Personal fork profile enhancements (enabled by default).
+    public static boolean fullProfilePictures = true;
+    public static boolean showProfileRelationship = true;
+
     // Misc Options
     public static boolean isMiscEnabled = false;
     public static boolean disableStoryFlipping = false;

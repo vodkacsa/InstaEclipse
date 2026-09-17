@@ -110,6 +110,11 @@ public class FeatureManager {
         }
 
 
+        if (FeatureFlags.fullProfilePictures) FeatureStatusTracker.setEnabled("FullProfilePictures", R.string.profile_full_pictures);
+        else FeatureStatusTracker.setDisabled("FullProfilePictures");
+        if (FeatureFlags.showProfileRelationship) FeatureStatusTracker.setEnabled("ProfileRelationship", R.string.profile_relationship);
+        else FeatureStatusTracker.setDisabled("ProfileRelationship");
+
         // Miscellaneous
         if (FeatureFlags.disableTrackingLinks) {
             FeatureStatusTracker.setEnabled("DisableTrackingLinks", R.string.ig_dialog_ad_disable_tracking);

@@ -85,6 +85,8 @@ public class SettingsManager {
         editor.putInt("forceReelQuality", FeatureFlags.forceReelQuality);
         editor.putBoolean("disableRepost", FeatureFlags.disableRepost);
         editor.putBoolean("showFollowerToast", FeatureFlags.showFollowerToast);
+        editor.putBoolean("fullProfilePictures", FeatureFlags.fullProfilePictures);
+        editor.putBoolean("showProfileRelationship", FeatureFlags.showProfileRelationship);
         editor.putBoolean("showFeatureToasts", FeatureFlags.showFeatureToasts);
         editor.putBoolean("enableStoryMentions", FeatureFlags.enableStoryMentions);
         editor.putBoolean("disableDiscoverPeople", FeatureFlags.disableDiscoverPeople);
@@ -191,6 +193,8 @@ public class SettingsManager {
         FeatureFlags.forceReelQuality = prefs.getInt("forceReelQuality", 0);
         FeatureFlags.disableRepost = prefs.getBoolean("disableRepost", false);
         FeatureFlags.showFollowerToast = prefs.getBoolean("showFollowerToast", false);
+        FeatureFlags.fullProfilePictures = prefs.getBoolean("fullProfilePictures", true);
+        FeatureFlags.showProfileRelationship = prefs.getBoolean("showProfileRelationship", true);
         FeatureFlags.showFeatureToasts = prefs.getBoolean("showFeatureToasts", false);
         FeatureFlags.enableStoryMentions = prefs.getBoolean("enableStoryMentions", false);
         FeatureFlags.disableDiscoverPeople = prefs.getBoolean("disableDiscoverPeople", false);
