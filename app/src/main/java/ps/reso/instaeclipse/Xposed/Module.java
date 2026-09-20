@@ -459,7 +459,7 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         ModuleLog.line("(IE|FullProfilePictures) Unsupported view: " + t.getMessage());
                     }
                     try {
-                        new ps.reso.instaeclipse.mods.profile.ProfileRelationshipHook().install(dexKitBridge, lpparam.classLoader);
+                        new ps.reso.instaeclipse.mods.profile.ProfileRelationshipHook().install(lpparam.classLoader);
                     } catch (Throwable t) {
                         ModuleLog.line("(IE|ProfileRelationship) Unsupported profile: " + t.getMessage());
                     }

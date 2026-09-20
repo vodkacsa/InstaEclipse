@@ -5,6 +5,7 @@ import ps.reso.instaeclipse.R;
 public class FeatureManager {
 
     public static void refreshFeatureStatus() {
+        ps.reso.instaeclipse.utils.tracker.FollowIndicatorTracker.INSTANCE.refreshPresentation();
         // Developer Options
         if (FeatureFlags.isDevEnabled) {
             FeatureStatusTracker.setEnabled("DevOptions", R.string.ig_dialog_section_dev_options);

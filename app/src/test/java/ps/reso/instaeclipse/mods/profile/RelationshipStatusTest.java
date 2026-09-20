@@ -16,7 +16,7 @@ public class RelationshipStatusTest {
         assertEquals(RelationshipStatus.UNKNOWN, RelationshipStatus.from(null, null));
         assertEquals(RelationshipStatus.UNKNOWN, RelationshipStatus.from(null, true));
         assertEquals(RelationshipStatus.UNKNOWN, RelationshipStatus.from(null, false));
-        assertEquals(RelationshipStatus.UNKNOWN, RelationshipStatus.from(false, null));
+        assertEquals(RelationshipStatus.DOES_NOT_FOLLOW, RelationshipStatus.from(false, null));
         assertEquals(RelationshipStatus.FOLLOWS_YOU, RelationshipStatus.from(true, null));
     }
 }

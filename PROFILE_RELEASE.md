@@ -1,18 +1,19 @@
-# InstaEclipse profile enhancements
+# InstaEclipse 0.7.0-tomi.2
 
-Personal experimental fork of ReSo7200/InstaEclipse 0.7.0.
+- Reuses the existing follower toast's `/friendships/show/` response for the profile label. Both displays use the same `followed_by` value; `following` from that response distinguishes mutual follows (**Friends**).
+- Removes the floating window overlay and the separate friendship-model detector.
+- Displays a small label inside the scrolling profile header, beside the native Threads control when the row has room. On narrower layouts it uses the next line; custom containers use the existing native header text. The label inherits the surrounding text styling.
+- Independent **Miscellaneous → Show follow status in profile** toggle, in both the companion app and Instagram's module menu. It works with the original follower toast switched off. The original toast remains independently selectable.
+- Missing or unrecognised data stays hidden. A newer response takes precedence over an older callback. Profile changes remove the previous label; changing accounts clears cached relationship data.
+- Fixes String, direct/sliced ByteBuffer, and wrapped response decoding without consuming Instagram's buffers. Uses no extra network requests.
+- Keeps the full-profile-picture option from the first build.
 
-- **Full profile pictures:** draws the complete image supplied by Instagram, fitted without the circular mask, on supported profile-header and expanded-profile image views. Does not recover pixels already cropped by Instagram's server.
-- **Profile relationship badge:** shows **Friends** for mutual follows, **Follows you**, **You follow them**, or **Does not follow you**. Unknown or unsupported profile data is shown as **Follow status unavailable**, never guessed. Friends means mutual following, not Instagram Close Friends.
-- Both settings are enabled by default and available under **Miscellaneous** in the module and in-app menu. Reopen the profile after changing photo settings.
-- English and Hungarian labels. Settings are included in backup/restore.
+## Installation
 
-## Install
+Download `InstaEclipse-0.7.0-tomi.2.apk` from Assets. This is the InstaEclipse module for LSPosed/LSPatch, not a patched Instagram app.
 
-Download `InstaEclipse-0.7.0-tomi.1.apk`. This is the **module APK**, not a patched Instagram APK. Enable it for Instagram using LSPosed, or patch Instagram using JingMatrix LSPatch on non-rooted phones, following the upstream README. Force stop and reopen Instagram.
+This experimental APK is debug-signed with a different key from tomi.1. Back up module settings, replace only the old **InstaEclipse module**, then enable this version and force stop/reopen Instagram. Do not uninstall Instagram for a module signature conflict. With an embedded LSPatch module, update the embedded module using your existing patch workflow.
 
-This personal prerelease is debug-signed and cannot update the upstream signed module in place. Back up your module settings before replacing the old **InstaEclipse module**; do not uninstall Instagram for a module-signature conflict. Future debug builds may also need module replacement because their signing key can change.
+## Validation
 
-## Verification and limitations
-
-The release workflow runs all JVM unit tests, builds the APK, and verifies its signature before publishing. Android/Instagram device behavior has **not** been verified. The hooks target named Instagram view and profile classes; Instagram updates or alternate profile layouts may be unsupported. The relationship label uses the displayed profile's own model, requires a matching username, and sends no additional requests. If data is missing, it reports unavailable. The badge appears at the upper right below the profile toolbar.
+The release workflow runs the JVM tests (including response parsing, account/profile isolation, out-of-order callbacks, and Android view layout/removal tests), builds the APK, and verifies its signature before publication. Actual Instagram layout compatibility still needs device testing. Unsupported header layouts remain untouched, with no floating fallback. The label appears only when Instagram's existing friendship response is observed; reopen or refresh the profile after enabling it if necessary.
