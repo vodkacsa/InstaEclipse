@@ -20,6 +20,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import ps.reso.instaeclipse.R;
+import ps.reso.instaeclipse.mods.profile.PfpDiagnostics;
 import ps.reso.instaeclipse.utils.feature.FeatureFlags;
 import ps.reso.instaeclipse.utils.feature.FeatureStatusTracker;
 import ps.reso.instaeclipse.utils.i18n.I18n;
@@ -57,12 +58,13 @@ public class ProfilePicDownloadHook {
         XposedHelpers.findAndHookMethod(View.class, "onAttachedToWindow", new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
-                if (!FeatureFlags.enableProfileDownload) return;
                 View v = (View) param.thisObject;
                 int vid = v.getId();
                 if (vid == View.NO_ID) return;
 
-                // Fast path: cached int comparison (only resolves resource name once)
+                // Fast path: cached int comparison (only resolves resource name once).
+                // Run diagnostics as soon as the exact stable target is identified,
+                // regardless of whether profile-picture downloading is enabled.
                 if (expandedPicViewId != 0) {
                     if (vid != expandedPicViewId) return;
                 } else {
@@ -73,6 +75,9 @@ public class ProfilePicDownloadHook {
                     } catch (Throwable ignored) { return; }
                 }
 
+                PfpDiagnostics.schedule(v);
+
+                if (!FeatureFlags.enableProfileDownload) return;
                 injectLongPress(v);
             }
         });
