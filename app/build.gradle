@@ -10,8 +10,10 @@ android {
         applicationId "ps.reso.instaeclipse"
         minSdkVersion 28
         targetSdk 36
-        versionCode 17
-        versionName '0.7.0'
+        // Keep local builds unchanged, but let CI assign a monotonically increasing
+        // version so APKs published from Actions can be installed as updates.
+        versionCode (System.getenv("CI_VERSION_CODE") ?: "17").toInteger()
+        versionName (System.getenv("CI_VERSION_NAME") ?: "0.7.0")
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
