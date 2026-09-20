@@ -5,7 +5,6 @@ import ps.reso.instaeclipse.R;
 public class FeatureManager {
 
     public static void refreshFeatureStatus() {
-        ps.reso.instaeclipse.mods.profile.ProfilePictureRenderer.refresh(FeatureFlags.fullProfilePictures);
         // Developer Options
         if (FeatureFlags.isDevEnabled) {
             FeatureStatusTracker.setEnabled("DevOptions", R.string.ig_dialog_section_dev_options);
@@ -110,9 +109,6 @@ public class FeatureManager {
             FeatureStatusTracker.setDisabled("HideThreadsSuggestions");
         }
 
-
-        if (FeatureFlags.fullProfilePictures) FeatureStatusTracker.setEnabled("FullProfilePictures", R.string.profile_full_pictures);
-        else FeatureStatusTracker.setDisabled("FullProfilePictures");
 
         // Miscellaneous
         if (FeatureFlags.disableTrackingLinks) {

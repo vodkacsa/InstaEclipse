@@ -200,13 +200,6 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
                     // --- Feature Hooks ---
 
-                    // Temporary runtime Layout Inspector for diagnosing Instagram's avatar renderer.
-                    try {
-                        ps.reso.instaeclipse.mods.devops.RuntimeLayoutInspector.install(lpparam.classLoader);
-                    } catch (Throwable t) {
-                        ModuleLog.line("(IE|LayoutInspector) install failed: " + t);
-                    }
-
                     // Developer Options
                     try {
                         new DevOptionsUnlockHook().handleDevOptions(dexKitBridge);
@@ -458,14 +451,6 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     } catch (Throwable ignored) {
                         ModuleLog.line("(InstaEclipse | ReelDownload): ❌ Failed to hook");
                     }
-
-                    // Personal fork: full profile pictures.
-                    try {
-                        ps.reso.instaeclipse.mods.profile.FullProfilePictureHook.install(lpparam.classLoader);
-                    } catch (Throwable t) {
-                        ModuleLog.line("(IE|FullProfilePictures) Unsupported view: " + t.getMessage());
-                    }
-
 
                     // Profile Picture Download
                     try {

@@ -69,7 +69,6 @@ public class SettingsBackupManager {
         s.put("spoofLng",                String.valueOf(FeatureFlags.spoofLng));
         s.put("forceReelQuality",        FeatureFlags.forceReelQuality);
         s.put("disableRepost",           FeatureFlags.disableRepost);
-        s.put("fullProfilePictures", FeatureFlags.fullProfilePictures);
         s.put("showFollowerToast",       FeatureFlags.showFollowerToast);
         s.put("showFeatureToasts",       FeatureFlags.showFeatureToasts);
         s.put("enableStoryMentions",     FeatureFlags.enableStoryMentions);
@@ -149,7 +148,6 @@ public class SettingsBackupManager {
         if (s.has("spoofLng"))               FeatureFlags.spoofLng               = parseDouble(s.get("spoofLng"), 0.0);
         if (s.has("forceReelQuality"))        FeatureFlags.forceReelQuality       = s.getInt("forceReelQuality");
         if (s.has("disableRepost"))          FeatureFlags.disableRepost          = s.getBoolean("disableRepost");
-        if (s.has("fullProfilePictures")) FeatureFlags.fullProfilePictures = s.getBoolean("fullProfilePictures");
         if (s.has("showFollowerToast"))      FeatureFlags.showFollowerToast      = s.getBoolean("showFollowerToast");
         if (s.has("showFeatureToasts"))      FeatureFlags.showFeatureToasts      = s.getBoolean("showFeatureToasts");
         if (s.has("enableStoryMentions"))    FeatureFlags.enableStoryMentions    = s.getBoolean("enableStoryMentions");

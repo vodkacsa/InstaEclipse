@@ -1217,8 +1217,7 @@ public class DialogUtils {
                 createSwitch(context, R.drawable.ic_content_copy, "#BF5AF2", I18n.t(context, R.string.ig_dialog_misc_copy_caption),            FeatureFlags.enableCaptionCopy),
                 createSwitch(context, R.drawable.ic_search, "#BF5AF2", I18n.t(context, R.string.ig_dialog_misc_photo_zoom),               FeatureFlags.enablePhotoZoom),
                 createSwitch(context, R.drawable.ic_timer, "#BF5AF2", I18n.t(context, R.string.ig_dialog_misc_spoof_last_seen),          FeatureFlags.spoofLastSeen),
-                createSwitch(context, R.drawable.ic_sparkle, "#BF5AF2", I18n.t(context, R.string.ig_dialog_misc_remove_meta_ai),        FeatureFlags.removeMetaAI),
-                createSwitch(context, R.drawable.ic_search, "#BF5AF2", I18n.t(context, R.string.profile_full_pictures), FeatureFlags.fullProfilePictures),
+                createSwitch(context, R.drawable.ic_sparkle, "#BF5AF2", I18n.t(context, R.string.ig_dialog_misc_remove_meta_ai),        FeatureFlags.removeMetaAI)
                 // Lock controls moved to their own grouped "Lock" card below (see buildLockCard).
         };
 
@@ -1282,9 +1281,6 @@ public class DialogUtils {
                         break;
                     case 12:
                         FeatureFlags.removeMetaAI = isChecked;
-                        break;
-                    case 13:
-                        FeatureFlags.fullProfilePictures = isChecked;
                         break;
                 }
 

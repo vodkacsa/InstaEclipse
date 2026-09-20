@@ -10,8 +10,8 @@ android {
         applicationId "ps.reso.instaeclipse"
         minSdkVersion 28
         targetSdk 36
-        versionCode 20
-        versionName '0.7.0-tomi.3'
+        versionCode 17
+        versionName '0.7.0'
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -21,10 +21,6 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
-    }
-
-    testOptions {
-        unitTests.includeAndroidResources = true
     }
 
     compileOptions {
@@ -54,7 +50,6 @@ dependencies {
     implementation libs.fileprefs
     // Testing dependencies
     testImplementation libs.junit
-    testImplementation "org.robolectric:robolectric:4.13"
     androidTestImplementation libs.ext.junit
     androidTestImplementation libs.espresso.core.v361
 
