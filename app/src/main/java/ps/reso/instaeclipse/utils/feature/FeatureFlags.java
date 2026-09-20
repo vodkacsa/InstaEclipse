@@ -63,7 +63,6 @@ public class FeatureFlags {
 
     // Personal fork profile enhancements (enabled by default).
     public static boolean fullProfilePictures = true;
-    public static boolean showProfileRelationship = true;
 
     // Misc Options
     public static boolean isMiscEnabled = false;

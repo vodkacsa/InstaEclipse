@@ -5,7 +5,7 @@ import ps.reso.instaeclipse.R;
 public class FeatureManager {
 
     public static void refreshFeatureStatus() {
-        ps.reso.instaeclipse.utils.tracker.FollowIndicatorTracker.INSTANCE.refreshPresentation();
+        ps.reso.instaeclipse.mods.profile.ProfilePictureRenderer.refresh(FeatureFlags.fullProfilePictures);
         // Developer Options
         if (FeatureFlags.isDevEnabled) {
             FeatureStatusTracker.setEnabled("DevOptions", R.string.ig_dialog_section_dev_options);
@@ -113,8 +113,6 @@ public class FeatureManager {
 
         if (FeatureFlags.fullProfilePictures) FeatureStatusTracker.setEnabled("FullProfilePictures", R.string.profile_full_pictures);
         else FeatureStatusTracker.setDisabled("FullProfilePictures");
-        if (FeatureFlags.showProfileRelationship) FeatureStatusTracker.setEnabled("ProfileRelationship", R.string.profile_relationship);
-        else FeatureStatusTracker.setDisabled("ProfileRelationship");
 
         // Miscellaneous
         if (FeatureFlags.disableTrackingLinks) {

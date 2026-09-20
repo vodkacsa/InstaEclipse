@@ -891,7 +891,7 @@ public class FeaturesFragment extends Fragment {
         defs.add(getString(R.string.feat_features));
         defs.add(Arrays.asList(
                 createMasterSwitch(getString(R.string.ig_dialog_enable_disable_all), Arrays.asList(
-                        "fullProfilePictures", "showProfileRelationship", "disableStoryFlipping", "disableVideoAutoPlay", "spoofLastSeen", "disableRepost", "showFollowerToast",
+                        "fullProfilePictures", "disableStoryFlipping", "disableVideoAutoPlay", "spoofLastSeen", "disableRepost", "showFollowerToast",
                         "showFeatureToasts", "enableStoryMentions", "disableDiscoverPeople", "enableCopyComment",
                         "disableDoubleTapLike", "enableCaptionCopy", "enablePhotoZoom", "removeMetaAI"
                 )),
@@ -900,7 +900,6 @@ public class FeaturesFragment extends Fragment {
                 createSwitch(R.drawable.ic_timer, "#BF5AF2", getString(R.string.ig_dialog_misc_spoof_last_seen), "spoofLastSeen"),
                 createSwitch(R.drawable.ic_block, "#BF5AF2", getString(R.string.ig_dialog_misc_disable_repost), "disableRepost"),
                 createSwitch(R.drawable.ic_search, "#BF5AF2", getString(R.string.profile_full_pictures), "fullProfilePictures"),
-                createSwitch(R.drawable.ic_notification, "#BF5AF2", getString(R.string.profile_relationship), "showProfileRelationship"),
                 createSwitch(R.drawable.ic_notification, "#BF5AF2", getString(R.string.ig_dialog_misc_show_follower_toast), "showFollowerToast"),
                 createSwitch(R.drawable.ic_notification, "#BF5AF2", getString(R.string.ig_dialog_misc_show_feature_toasts), "showFeatureToasts"),
                 createSwitch(R.drawable.ic_at, "#BF5AF2", getString(R.string.ig_dialog_misc_view_story_mentions), "enableStoryMentions"),
@@ -1252,7 +1251,7 @@ public class FeaturesFragment extends Fragment {
     // =========================================================
 
     private void stageChange(String prefKey, boolean isChecked) {
-        if (localCache.getBoolean(prefKey, prefKey.equals("fullProfilePictures") || prefKey.equals("showProfileRelationship")) == isChecked) {
+        if (localCache.getBoolean(prefKey, prefKey.equals("fullProfilePictures")) == isChecked) {
             stagedChanges.remove(prefKey);
         } else {
             stagedChanges.put(prefKey, isChecked);
@@ -1289,7 +1288,7 @@ public class FeaturesFragment extends Fragment {
     private boolean getCurrentState(String prefKey) {
         if (prefKey == null) return false;
         if (stagedChanges.containsKey(prefKey)) return stagedChanges.get(prefKey);
-        return localCache.getBoolean(prefKey, prefKey.equals("fullProfilePictures") || prefKey.equals("showProfileRelationship"));
+        return localCache.getBoolean(prefKey, prefKey.equals("fullProfilePictures"));
     }
 
     // =========================================================

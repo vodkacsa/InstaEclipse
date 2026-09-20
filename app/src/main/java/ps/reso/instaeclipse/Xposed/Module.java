@@ -452,17 +452,13 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         ModuleLog.line("(InstaEclipse | ReelDownload): ❌ Failed to hook");
                     }
 
-                    // Personal fork: uncropped avatars and per-profile relationship badge.
+                    // Personal fork: full profile pictures.
                     try {
                         ps.reso.instaeclipse.mods.profile.FullProfilePictureHook.install(lpparam.classLoader);
                     } catch (Throwable t) {
                         ModuleLog.line("(IE|FullProfilePictures) Unsupported view: " + t.getMessage());
                     }
-                    try {
-                        new ps.reso.instaeclipse.mods.profile.ProfileRelationshipHook().install(lpparam.classLoader);
-                    } catch (Throwable t) {
-                        ModuleLog.line("(IE|ProfileRelationship) Unsupported profile: " + t.getMessage());
-                    }
+
 
                     // Profile Picture Download
                     try {

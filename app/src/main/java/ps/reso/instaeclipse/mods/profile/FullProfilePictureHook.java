@@ -1,86 +1,84 @@
 package ps.reso.instaeclipse.mods.profile;
 
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.graphics.Rect;
-import android.graphics.drawable.Drawable;
 import android.view.View;
-import android.widget.ImageView;
 import java.lang.reflect.Method;
-import java.util.Collections;
 import java.util.Set;
-import java.util.WeakHashMap;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import ps.reso.instaeclipse.utils.feature.FeatureFlags;
 import ps.reso.instaeclipse.utils.feature.FeatureStatusTracker;
+import ps.reso.instaeclipse.utils.log.ModuleLog;
 
-/** Render the original image drawable fitted inside the view, without the circular mask. */
+/** Bypass the circular drawable as well as the circular view's onDraw. */
 public final class FullProfilePictureHook {
-    private static final Map<View, Boolean> originalOutline = new WeakHashMap<>();
-    private static final Set<Integer> profileIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    private static final Set<Integer> otherIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final Set<Method> hooked = ConcurrentHashMap.newKeySet();
+    private static final Set<String> reported = ConcurrentHashMap.newKeySet();
 
-    public static void install(ClassLoader loader) throws ClassNotFoundException {
-        Class<?> circular = loader.loadClass("com.instagram.common.ui.widget.imageview.CircularImageView");
-        Method draw = XposedHelpers.findMethodExact(circular, "onDraw", Canvas.class);
-        XposedBridge.hookMethod(draw, new XC_MethodHook() {
-            @Override protected void beforeHookedMethod(MethodHookParam p) {
-                if (!(p.thisObject instanceof ImageView)) return;
-                ImageView view = (ImageView) p.thisObject;
-                if (!isProfilePicture(view)) return;
-                if (!FeatureFlags.fullProfilePictures) {
-                    Boolean outline = originalOutline.remove(view);
-                    if (outline != null) view.setClipToOutline(outline);
-                    return;
-                }
-                Drawable image = view.getDrawable();
-                if (image == null || image.getIntrinsicWidth() <= 0 || image.getIntrinsicHeight() <= 0) return;
-                int width = view.getWidth() - view.getPaddingLeft() - view.getPaddingRight();
-                int height = view.getHeight() - view.getPaddingTop() - view.getPaddingBottom();
-                if (width <= 0 || height <= 0) return;
-                Canvas canvas = (Canvas) p.args[0];
-                Rect oldBounds = new Rect(image.getBounds());
-                int saved = canvas.save();
-                Drawable.Callback callback = image.getCallback();
-                try {
-                    float scale = Math.min((float) width / image.getIntrinsicWidth(), (float) height / image.getIntrinsicHeight());
-                    float w = image.getIntrinsicWidth() * scale, h = image.getIntrinsicHeight() * scale;
-                    canvas.translate(view.getPaddingLeft() + (width - w) / 2,
-                            view.getPaddingTop() + (height - h) / 2);
-                    canvas.scale(scale, scale);
-                    // Bounds changes must not schedule another frame on every draw.
-                    image.setCallback(null);
-                    image.setBounds(0, 0, image.getIntrinsicWidth(), image.getIntrinsicHeight());
-                    image.draw(canvas);
-                    if (!originalOutline.containsKey(view)) originalOutline.put(view, view.getClipToOutline());
-                    if (view.getClipToOutline()) view.setClipToOutline(false);
-                    p.setResult(null); // Skip only this avatar's circular onDraw, not other images.
-                } catch (Throwable ignored) {
-                    // Let Instagram draw normally if its drawable is incompatible.
-                } finally {
-                    image.setBounds(oldBounds);
-                    image.setCallback(callback);
-                    canvas.restoreToCount(saved);
-                }
+    public static void install(ClassLoader loader) {
+        int found = 0;
+        for (String name : new String[]{"com.instagram.common.ui.widget.imageview.CircularImageView",
+                "com.instagram.common.ui.widget.imageview.IgImageView"}) {
+            try { installView(loader.loadClass(name)); found++; }
+            catch (Throwable t) { ModuleLog.line("(IE|FullProfilePictures) " + name + ": " + t.getMessage()); }
+        }
+        if (found == 0) throw new IllegalStateException("No supported Instagram image view class found");
+        XposedHelpers.findAndHookMethod(View.class, "onAttachedToWindow", new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam p) {
+                View view = (View) p.thisObject;
+                if (!ProfilePictureRenderer.isProfilePicture(view)) return;
+                if (FeatureFlags.fullProfilePictures) ProfilePictureRenderer.prepare(view);
+                // Named wrappers are containers, not image renderers.
+                try { view.getClass().getMethod("getDrawable"); }
+                catch (NoSuchMethodException ignored) { return; }
+                // Discover overrides on concrete image-view subclasses rather than assuming one class.
+                try { installView(view.getClass()); }
+                catch (Throwable t) { report(view, "Cannot hook image view: " + t.getMessage()); }
             }
         });
-        FeatureStatusTracker.setHooked("FullProfilePictures");
     }
 
-    private static boolean isProfilePicture(View view) {
-        int id = view.getId();
-        if (id == View.NO_ID || otherIds.contains(id)) return false;
-        if (profileIds.contains(id)) return true;
+    private static void installView(Class<?> type) throws NoSuchMethodException {
+        Method draw = method(type, "onDraw", Canvas.class);
+        if (hooked.add(draw)) XposedBridge.hookMethod(draw, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam p) {
+                View view = (View) p.thisObject;
+                if (!FeatureFlags.fullProfilePictures || !ProfilePictureRenderer.isProfilePicture(view)) return;
+                try {
+                    ProfilePictureRenderer.prepare(view);
+                    if (ProfilePictureRenderer.draw(view, (Canvas) p.args[0])) {
+                        p.setResult(null);
+                        FeatureStatusTracker.setHooked("FullProfilePictures");
+                    } else {
+                        report(view, "Waiting for a supported bitmap; drawable=" +
+                                (ProfilePictureRenderer.drawable(view) == null ? "null" : ProfilePictureRenderer.drawable(view).getClass().getName()));
+                    }
+                } catch (Throwable t) { report(view, "Bitmap draw failed: " + t.getMessage()); }
+            }
+        });
         try {
-            String name = view.getResources().getResourceEntryName(id);
-            boolean profile = name.equals("expanded_profile_pic") || name.equals("row_profile_header_imageview")
-                    || name.equals("profile_header_imageview");
-            (profile ? profileIds : otherIds).add(id);
-            return profile;
-        } catch (Throwable ignored) { return false; }
+            Method setter = method(type, "setImageBitmap", Bitmap.class);
+            if (hooked.add(setter)) XposedBridge.hookMethod(setter, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    View view = (View) p.thisObject;
+                    if (ProfilePictureRenderer.isProfilePicture(view)) ProfilePictureRenderer.capture(view, (Bitmap) p.args[0]);
+                }
+            });
+        } catch (NoSuchMethodException ignored) { }
+    }
+
+    private static Method method(Class<?> type, String name, Class<?> argument) throws NoSuchMethodException {
+        for (Class<?> c = type; c != null; c = c.getSuperclass()) {
+            try { return c.getDeclaredMethod(name, argument); }
+            catch (NoSuchMethodException ignored) { }
+        }
+        throw new NoSuchMethodException(type.getName() + "." + name);
+    }
+
+    private static void report(View view, String message) {
+        if (reported.add(view.getClass().getName() + message)) ModuleLog.line("(IE|FullProfilePictures) " + view.getClass().getName() + ": " + message);
     }
 }

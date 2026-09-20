@@ -1,10 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="profile_full_pictures">Full profile pictures</string>
-    <string name="profile_relationship">Show follow status in profile</string>
-    <string name="profile_relationship_friends">Friends</string>
-    <string name="profile_relationship_follows_you">Follows you</string>
-    <string name="profile_relationship_following">You follow them</string>
-    <string name="profile_relationship_neither">Does not follow you</string>
-    <string name="profile_relationship_unknown">Follow status unavailable</string>
 </resources>

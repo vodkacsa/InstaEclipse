@@ -1,19 +1,17 @@
-# InstaEclipse 0.7.0-tomi.2
+# InstaEclipse 0.7.0-tomi.3
 
-- Reuses the existing follower toast's `/friendships/show/` response for the profile label. Both displays use the same `followed_by` value; `following` from that response distinguishes mutual follows (**Friends**).
-- Removes the floating window overlay and the separate friendship-model detector.
-- Displays a small label inside the scrolling profile header, beside the native Threads control when the row has room. On narrower layouts it uses the next line; custom containers use the existing native header text. The label inherits the surrounding text styling.
-- Independent **Miscellaneous → Show follow status in profile** toggle, in both the companion app and Instagram's module menu. It works with the original follower toast switched off. The original toast remains independently selectable.
-- Missing or unrecognised data stays hidden. A newer response takes precedence over an older callback. Profile changes remove the previous label; changing accounts clears cached relationship data.
-- Fixes String, direct/sliced ByteBuffer, and wrapped response decoding without consuming Instagram's buffers. Uses no extra network requests.
-- Keeps the full-profile-picture option from the first build.
+- Completely removes our inline follow-status label, its toggle, relationship cache, and profile hooks. Restores the upstream follower toast and its original setting.
+- Replaces the profile-picture renderer. The previous version redrew Instagram's drawable, which can itself apply a circular mask. This version extracts the underlying bitmap and draws its entire rectangle directly, fitted without center cropping.
+- Supports private/inherited bitmap fields in custom circular drawables, plus the bitmap passed to the image setter. It does not change the drawable's bounds or callbacks. A captured bitmap is never reused after the displayed drawable changes.
+- Hooks inherited and concrete image-view draw methods and recognises unnamed image children inside the supported profile-picture wrappers. Disables outline clipping on the picture and named picture wrapper; disabling the feature restores clipping.
+- Keeps **Miscellaneous → Full profile pictures** as the independent picture toggle. Force stop/reopen Instagram after activating the updated module.
 
-## Installation
+## Download and installation
 
-Download `InstaEclipse-0.7.0-tomi.2.apk` from Assets. This is the InstaEclipse module for LSPosed/LSPatch, not a patched Instagram app.
+Download `InstaEclipse-0.7.0-tomi.3.apk` from Assets. This is an LSPosed/LSPatch module, not a patched Instagram APK. Back up module settings before replacing the old module: this experimental build uses a new debug signing key. For embedded LSPatch modules, update the module through your existing patch workflow. Do not uninstall Instagram just to replace the module.
 
-This experimental APK is debug-signed with a different key from tomi.1. Back up module settings, replace only the old **InstaEclipse module**, then enable this version and force stop/reopen Instagram. Do not uninstall Instagram for a module signature conflict. With an embedded LSPatch module, update the embedded module using your existing patch workflow.
+## Verification and limits
 
-## Validation
+The release pipeline runs tests, builds the APK, and verifies its signature before publishing. Android native-graphics regression tests check that previously transparent corners are visible, non-square images retain both edges, drawable state is preserved, recycled views do not reuse stale images, and outline clipping is restored when disabled.
 
-The release workflow runs the JVM tests (including response parsing, account/profile isolation, out-of-order callbacks, and Android view layout/removal tests), builds the APK, and verifies its signature before publication. Actual Instagram layout compatibility still needs device testing. Unsupported header layouts remain untouched, with no floating fallback. The label appears only when Instagram's existing friendship response is observed; reopen or refresh the profile after enabling it if necessary.
+Real-device compatibility with your Instagram build is not verified here. Only the full bitmap Instagram supplies can be shown; pixels already cropped out by the server cannot be recovered. Unrecognised image payloads fall back to Instagram's normal rendering, with a diagnostic entry in the module log.
