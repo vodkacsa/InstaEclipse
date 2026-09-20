@@ -12,8 +12,10 @@ android {
         targetSdk 36
         // Keep local builds unchanged, but let CI assign a monotonically increasing
         // version so APKs published from Actions can be installed as updates.
-        versionCode (System.getenv("CI_VERSION_CODE") ?: "17").toInteger()
-        versionName (System.getenv("CI_VERSION_NAME") ?: "0.7.0")
+        def ciVersionCode = System.getenv("CI_VERSION_CODE")
+        def ciVersionName = System.getenv("CI_VERSION_NAME")
+        versionCode ciVersionCode != null ? Integer.parseInt(ciVersionCode) : 17
+        versionName ciVersionName != null ? ciVersionName : '0.7.0'
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
