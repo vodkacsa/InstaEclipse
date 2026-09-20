@@ -20,7 +20,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import ps.reso.instaeclipse.R;
-import ps.reso.instaeclipse.mods.profile.PfpDiagnostics;
+import ps.reso.instaeclipse.mods.profile.PfpRendererBypass;
 import ps.reso.instaeclipse.utils.feature.FeatureFlags;
 import ps.reso.instaeclipse.utils.feature.FeatureStatusTracker;
 import ps.reso.instaeclipse.utils.i18n.I18n;
@@ -75,7 +75,7 @@ public class ProfilePicDownloadHook {
                     } catch (Throwable ignored) { return; }
                 }
 
-                PfpDiagnostics.schedule(v);
+                PfpRendererBypass.arm(v);
 
                 if (!FeatureFlags.enableProfileDownload) return;
                 injectLongPress(v);
