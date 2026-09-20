@@ -59,32 +59,23 @@ public class ProfilePicDownloadHook {
             protected void afterHookedMethod(MethodHookParam param) {
                 if (!FeatureFlags.enableProfileDownload) return;
                 View v = (View) param.thisObject;
-                if (!isExpandedProfilePicture(v)) return;
+                int vid = v.getId();
+                if (vid == View.NO_ID) return;
+
+                // Fast path: cached int comparison (only resolves resource name once)
+                if (expandedPicViewId != 0) {
+                    if (vid != expandedPicViewId) return;
+                } else {
+                    try {
+                        String name = v.getResources().getResourceEntryName(vid);
+                        if (!"expanded_profile_pic".equals(name)) return;
+                        expandedPicViewId = vid;
+                    } catch (Throwable ignored) { return; }
+                }
 
                 injectLongPress(v);
             }
         });
-    }
-
-    /**
-     * Stable profile-picture detector shared by the downloader and personal-fork UI hooks.
-     * Instagram's profile header currently exposes this view as "expanded_profile_pic".
-     */
-    public static boolean isExpandedProfilePicture(View view) {
-        if (view == null) return false;
-        int vid = view.getId();
-        if (vid == View.NO_ID) return false;
-
-        if (expandedPicViewId != 0) return vid == expandedPicViewId;
-
-        try {
-            String name = view.getResources().getResourceEntryName(vid);
-            if (!"expanded_profile_pic".equals(name)) return false;
-            expandedPicViewId = vid;
-            return true;
-        } catch (Throwable ignored) {
-            return false;
-        }
     }
 
     // ── UI injection ──────────────────────────────────────────────────────────
