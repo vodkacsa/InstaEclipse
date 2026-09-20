@@ -3,17 +3,20 @@ package ps.reso.instaeclipse.mods.profile;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
-import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.view.View;
 import android.widget.ImageView;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
-import java.util.Map;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -24,21 +27,26 @@ import ps.reso.instaeclipse.utils.log.ModuleLog;
 /**
  * Personal-fork profile picture uncrop.
  *
- * Uses the exact same "expanded_profile_pic" view that the existing profile-picture
- * downloader already targets. Instagram's CircularImageView wraps the original bitmap in
- * a circular drawable; we remember that original bitmap and replace only that drawable's
- * draw() call for the expanded profile picture.
+ * The existing downloader already gives us a stable target:
+ * resource name "expanded_profile_pic". That view's hit box is square even though
+ * Instagram renders the image as a circle, so the crop is happening inside the
+ * view/drawable rather than in the surrounding layout.
  *
- * No extra overlay, no duplicate ImageView, no network request.
+ * For that exact view only, capture the original bitmap and replace its onDraw()
+ * with a normal FIT_CENTER bitmap draw. No overlay, duplicate ImageView, or
+ * network request is involved.
  */
 public final class ProfilePicUncropHook {
 
     private static final String TAG = "(IE|ProfileUncrop) ";
 
-    private static final Map<Drawable, Bitmap> TARGETS =
+    private static final Map<View, Bitmap> BITMAPS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
-    private static final Set<Class<?>> HOOKED_DRAWABLE_CLASSES =
+    private static final Set<Method> HOOKED_ON_DRAW =
+            Collections.synchronizedSet(new HashSet<>());
+
+    private static final Set<Class<?>> LOGGED_TARGET_CLASSES =
             Collections.synchronizedSet(new HashSet<>());
 
     private static volatile boolean installed;
@@ -48,98 +56,236 @@ public final class ProfilePicUncropHook {
     public static synchronized void install(ClassLoader classLoader) {
         if (installed) return;
 
-        Class<?> circular = XposedHelpers.findClassIfExists(
-                "com.instagram.common.ui.widget.imageview.CircularImageView",
-                classLoader
-        );
-
-        if (circular == null) {
-            ModuleLog.line(TAG + "CircularImageView class not found");
-            return;
-        }
-
-        XposedBridge.hookAllMethods(circular, "setImageBitmap", new XC_MethodHook() {
+        // Catch the exact profile view whenever it enters the hierarchy. This also
+        // handles images that were populated before our ImageView setter hooks saw them.
+        XposedHelpers.findAndHookMethod(View.class, "onAttachedToWindow", new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 if (!(param.thisObject instanceof View)) return;
-                if (param.args.length == 0 || !(param.args[0] instanceof Bitmap)) return;
-
                 View view = (View) param.thisObject;
                 if (!ProfilePicDownloadHook.isExpandedProfilePicture(view)) return;
-                if (!(view instanceof ImageView)) return;
-
-                Bitmap bitmap = (Bitmap) param.args[0];
-                Drawable drawable = ((ImageView) view).getDrawable();
-                if (drawable == null || bitmap.isRecycled()) return;
-
-                TARGETS.put(drawable, bitmap);
-                hookDrawableClass(drawable.getClass());
-
-                // Keep Android from applying an outline clip on top of the drawable.
-                try {
-                    view.setClipToOutline(false);
-                } catch (Throwable ignored) {}
-
-                view.invalidate();
+                arm(view);
             }
         });
+
+        // Capture the uncropped source before/after Instagram replaces it with its
+        // circular drawable. Hook ImageView itself so this survives changes to IG's
+        // CircularImageView implementation.
+        XposedHelpers.findAndHookMethod(ImageView.class, "setImageBitmap", Bitmap.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!(param.thisObject instanceof View)) return;
+                        View view = (View) param.thisObject;
+                        if (!ProfilePicDownloadHook.isExpandedProfilePicture(view)) return;
+                        if (param.args[0] instanceof Bitmap) {
+                            remember(view, (Bitmap) param.args[0], "setImageBitmap");
+                        }
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (param.thisObject instanceof View) {
+                            View view = (View) param.thisObject;
+                            if (ProfilePicDownloadHook.isExpandedProfilePicture(view)) arm(view);
+                        }
+                    }
+                });
+
+        XposedHelpers.findAndHookMethod(ImageView.class, "setImageDrawable", Drawable.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!(param.thisObject instanceof View)) return;
+                        View view = (View) param.thisObject;
+                        if (!ProfilePicDownloadHook.isExpandedProfilePicture(view)) return;
+
+                        if (param.args[0] instanceof Drawable) {
+                            Bitmap bitmap = bitmapFromDrawable((Drawable) param.args[0], 0);
+                            if (bitmap != null) remember(view, bitmap, "setImageDrawable");
+                        }
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (param.thisObject instanceof View) {
+                            View view = (View) param.thisObject;
+                            if (ProfilePicDownloadHook.isExpandedProfilePicture(view)) arm(view);
+                        }
+                    }
+                });
 
         installed = true;
         ModuleLog.line(TAG + "installed using existing expanded_profile_pic target");
     }
 
-    private static void hookDrawableClass(Class<?> drawableClass) {
-        if (drawableClass == null || !HOOKED_DRAWABLE_CLASSES.add(drawableClass)) return;
-
+    private static void arm(View view) {
         try {
-            XposedBridge.hookAllMethods(drawableClass, "draw", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    if (!(param.thisObject instanceof Drawable)) return;
-                    if (param.args.length == 0 || !(param.args[0] instanceof Canvas)) return;
+            view.setClipToOutline(false);
 
-                    Drawable drawable = (Drawable) param.thisObject;
-                    Bitmap bitmap = TARGETS.get(drawable);
-                    if (bitmap == null || bitmap.isRecycled()) return;
+            if (view instanceof ImageView) {
+                Drawable current = ((ImageView) view).getDrawable();
+                Bitmap bitmap = bitmapFromDrawable(current, 0);
+                if (bitmap != null) remember(view, bitmap, "current drawable");
+            }
 
-                    Canvas canvas = (Canvas) param.args[0];
-                    Rect bounds = drawable.getBounds();
-                    if (bounds.isEmpty()) return;
+            hookActualOnDraw(view.getClass());
+            view.invalidate();
 
-                    RectF dst = fitCenter(bounds, bitmap.getWidth(), bitmap.getHeight());
-
-                    Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-                    paint.setAlpha(drawable.getAlpha());
-                    paint.setColorFilter(drawable.getColorFilter());
-
-                    canvas.drawBitmap(bitmap, null, dst, paint);
-                    param.setResult(null);
-                }
-            });
-
-            ModuleLog.line(TAG + "hooked drawable " + drawableClass.getName());
+            if (LOGGED_TARGET_CLASSES.add(view.getClass())) {
+                ModuleLog.line(TAG + "target=" + view.getClass().getName()
+                        + " size=" + view.getWidth() + "x" + view.getHeight()
+                        + " drawable=" + (view instanceof ImageView
+                        && ((ImageView) view).getDrawable() != null
+                        ? ((ImageView) view).getDrawable().getClass().getName()
+                        : "null"));
+            }
         } catch (Throwable t) {
-            HOOKED_DRAWABLE_CLASSES.remove(drawableClass);
-            ModuleLog.line(TAG + "drawable hook failed for " + drawableClass.getName() + ": " + t);
+            ModuleLog.line(TAG + "arm failed: " + t);
         }
     }
 
-    private static RectF fitCenter(Rect bounds, int bitmapWidth, int bitmapHeight) {
-        if (bitmapWidth <= 0 || bitmapHeight <= 0) {
-            return new RectF(bounds);
+    /**
+     * Hook the first concrete onDraw(Canvas) implementation in the target view's
+     * inheritance chain. This avoids assuming CircularImageView still owns onDraw
+     * in every Instagram version.
+     */
+    private static void hookActualOnDraw(Class<?> start) {
+        Class<?> cls = start;
+        while (cls != null && View.class.isAssignableFrom(cls)) {
+            try {
+                Method method = cls.getDeclaredMethod("onDraw", Canvas.class);
+                if (Modifier.isAbstract(method.getModifiers())) {
+                    cls = cls.getSuperclass();
+                    continue;
+                }
+
+                if (!HOOKED_ON_DRAW.add(method)) return;
+                method.setAccessible(true);
+
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!(param.thisObject instanceof View)) return;
+                        if (param.args.length == 0 || !(param.args[0] instanceof Canvas)) return;
+
+                        View view = (View) param.thisObject;
+                        if (!ProfilePicDownloadHook.isExpandedProfilePicture(view)) return;
+
+                        Bitmap bitmap = BITMAPS.get(view);
+                        if ((bitmap == null || bitmap.isRecycled()) && view instanceof ImageView) {
+                            bitmap = bitmapFromDrawable(((ImageView) view).getDrawable(), 0);
+                            if (bitmap != null) remember(view, bitmap, "onDraw fallback");
+                        }
+
+                        if (bitmap == null || bitmap.isRecycled()) return;
+
+                        drawFullBitmap(view, (Canvas) param.args[0], bitmap);
+                        param.setResult(null);
+                    }
+                });
+
+                ModuleLog.line(TAG + "hooked onDraw at " + cls.getName());
+                return;
+            } catch (NoSuchMethodException ignored) {
+                cls = cls.getSuperclass();
+            } catch (Throwable t) {
+                ModuleLog.line(TAG + "onDraw hook failed at " + cls.getName() + ": " + t);
+                return;
+            }
         }
 
+        ModuleLog.line(TAG + "no concrete onDraw found for " + start.getName());
+    }
+
+    private static void remember(View view, Bitmap bitmap, String source) {
+        if (bitmap == null || bitmap.isRecycled()) return;
+        Bitmap old = BITMAPS.put(view, bitmap);
+        if (old != bitmap) {
+            ModuleLog.line(TAG + "bitmap " + bitmap.getWidth() + "x" + bitmap.getHeight()
+                    + " from " + source);
+        }
+    }
+
+    private static void drawFullBitmap(View view, Canvas canvas, Bitmap bitmap) {
+        float left = view.getPaddingLeft();
+        float top = view.getPaddingTop();
+        float right = view.getWidth() - view.getPaddingRight();
+        float bottom = view.getHeight() - view.getPaddingBottom();
+
+        float availableW = Math.max(0f, right - left);
+        float availableH = Math.max(0f, bottom - top);
+        if (availableW <= 0f || availableH <= 0f
+                || bitmap.getWidth() <= 0 || bitmap.getHeight() <= 0) return;
+
         float scale = Math.min(
-                bounds.width() / (float) bitmapWidth,
-                bounds.height() / (float) bitmapHeight
+                availableW / bitmap.getWidth(),
+                availableH / bitmap.getHeight()
         );
 
-        float width = bitmapWidth * scale;
-        float height = bitmapHeight * scale;
+        float width = bitmap.getWidth() * scale;
+        float height = bitmap.getHeight() * scale;
+        float x = left + (availableW - width) / 2f;
+        float y = top + (availableH - height) / 2f;
 
-        float left = bounds.left + (bounds.width() - width) / 2f;
-        float top = bounds.top + (bounds.height() - height) / 2f;
+        RectF dst = new RectF(x, y, x + width, y + height);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        canvas.drawBitmap(bitmap, null, dst, paint);
+    }
 
-        return new RectF(left, top, left + width, top + height);
+    /**
+     * Pull the underlying source bitmap out of Instagram's drawable wrappers.
+     * Circular drawables normally retain the original bitmap and only mask it
+     * while drawing, which is exactly what we want to bypass.
+     */
+    private static Bitmap bitmapFromDrawable(Drawable drawable, int depth) {
+        if (drawable == null || depth > 6) return null;
+
+        if (drawable instanceof BitmapDrawable) {
+            Bitmap bitmap = ((BitmapDrawable) drawable).getBitmap();
+            if (bitmap != null && !bitmap.isRecycled()) return bitmap;
+        }
+
+        try {
+            Drawable current = drawable.getCurrent();
+            if (current != null && current != drawable) {
+                Bitmap bitmap = bitmapFromDrawable(current, depth + 1);
+                if (bitmap != null) return bitmap;
+            }
+        } catch (Throwable ignored) {}
+
+        Class<?> cls = drawable.getClass();
+        while (cls != null && Drawable.class.isAssignableFrom(cls)) {
+            Field[] fields;
+            try {
+                fields = cls.getDeclaredFields();
+            } catch (Throwable t) {
+                cls = cls.getSuperclass();
+                continue;
+            }
+
+            for (Field field : fields) {
+                if (Modifier.isStatic(field.getModifiers())) continue;
+
+                try {
+                    field.setAccessible(true);
+                    Object value = field.get(drawable);
+
+                    if (value instanceof Bitmap) {
+                        Bitmap bitmap = (Bitmap) value;
+                        if (!bitmap.isRecycled()) return bitmap;
+                    }
+
+                    if (value instanceof Drawable && value != drawable) {
+                        Bitmap bitmap = bitmapFromDrawable((Drawable) value, depth + 1);
+                        if (bitmap != null) return bitmap;
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            cls = cls.getSuperclass();
+        }
+
+        return null;
     }
 }
