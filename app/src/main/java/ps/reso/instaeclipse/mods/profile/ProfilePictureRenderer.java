@@ -38,14 +38,13 @@ public final class ProfilePictureRenderer {
     }
 
     public static boolean isProfilePicture(View view) {
-        if (namedPicture(view)) return true;
-        // Some layouts put the public resource ID on a wrapper around an unnamed image.
-        if (view.getId() != View.NO_ID) return false;
+        // Instagram often gives the actual image view its own (obfuscated) ID while the stable
+        // public ID lives on a wrapper. Never stop just because an intermediate view has an ID.
         View current = view;
-        for (int depth = 0; depth < 3 && current.getParent() instanceof View; depth++) {
-            current = (View) current.getParent();
+        for (int depth = 0; depth <= 5; depth++) {
             if (namedPicture(current)) return true;
-            if (current.getId() != View.NO_ID) break;
+            if (!(current.getParent() instanceof View)) break;
+            current = (View) current.getParent();
         }
         return false;
     }
@@ -70,12 +69,14 @@ public final class ProfilePictureRenderer {
     }
 
     public static void prepare(View view) {
-        disableOutline(view);
+        // Disable outline clipping on the renderer and its nearby wrappers. Newer Instagram
+        // builds insert extra containers with their own IDs between expanded_profile_pic and
+        // the actual IgImageView/CircularImageView.
         View current = view;
-        for (int depth = 0; depth < 3 && current.getParent() instanceof View; depth++) {
+        for (int depth = 0; depth <= 5; depth++) {
+            disableOutline(current);
+            if (!(current.getParent() instanceof View)) break;
             current = (View) current.getParent();
-            if (namedPicture(current)) disableOutline(current);
-            else if (current.getId() != View.NO_ID) break;
         }
     }
 
