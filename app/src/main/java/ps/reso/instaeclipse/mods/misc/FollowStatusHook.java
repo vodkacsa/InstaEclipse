@@ -77,8 +77,13 @@ public final class FollowStatusHook {
                         || method.getParameterCount() == 0) continue;
                 try {
                     XposedBridge.hookMethod(method, new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) {
+                            // Capture readable bytes before Instagram advances a buffer's position.
+                            try { onCallback(p.thisObject, p.args, true); } catch (Throwable ignored) { }
+                        }
                         @Override protected void afterHookedMethod(MethodHookParam p) {
-                            try { onCallback(p.thisObject, p.args); } catch (Throwable ignored) { }
+                            // Some callbacks only populate their response-wrapper fields on return.
+                            try { onCallback(p.thisObject, p.args, false); } catch (Throwable ignored) { }
                         }
                     });
                 } catch (Throwable ignored) { }
@@ -86,16 +91,16 @@ public final class FollowStatusHook {
         }
     }
 
-    private static void onCallback(Object callback, Object[] args) {
+    private static void onCallback(Object callback, Object[] args, boolean before) {
         Pending request = pending.get(callback);
         if (request == null || request.completed.get()) return;
         FollowStatusResponse result = null;
         for (Object arg : args) {
             result = FollowStatusResponse.fromPayload(arg);
-            if (result == null) result = request.append(callback, arg);
+            if (result == null && before) result = request.append(callback, arg);
             if (result != null) break;
         }
-        if (result == null) result = FollowStatusResponse.fromPayload(callback);
+        if (result == null && !before) result = FollowStatusResponse.fromPayload(callback);
         if (result == null || !request.completed.compareAndSet(false, true)) return;
         synchronized (pending) { pending.entrySet().removeIf(entry -> entry.getValue() == request); }
         if (!FollowIndicatorTracker.INSTANCE.publish(request.request, result, SystemClock.elapsedRealtime())) return;
