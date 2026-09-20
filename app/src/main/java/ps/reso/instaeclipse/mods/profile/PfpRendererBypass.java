@@ -25,41 +25,28 @@ import ps.reso.instaeclipse.utils.log.ModuleLog;
 /**
  * Expanded profile-picture renderer bypass.
  *
- * Runtime diagnostics established that:
- *  - expanded_profile_pic is the real square CircularImageView;
- *  - disabling View outline clipping alone does not remove the circle;
- *  - its active drawable is an obfuscated wrapper (currently X.3cW);
- *  - that wrapper's draw(Canvas) is what ImageView.onDraw() calls;
- *  - inside that wrapper is Instagram's already-loaded image drawable
- *    (observed as X.2sN, intrinsic 1080x1080).
+ * Important rule: do not touch Instagram's expanded-profile container,
+ * background, translation, scale, or animation. Only replace what the exact
+ * expanded_profile_pic CircularImageView paints inside its own onDraw(Canvas).
  *
- * For the exact expanded_profile_pic only, this class:
- *  1. disables outline clipping;
- *  2. remembers the active root drawable;
- *  3. hooks that root drawable's draw(Canvas);
- *  4. finds the best nested, already-loaded Drawable;
- *  5. draws that nested drawable directly with FIT_CENTER bounds;
- *  6. skips the wrapper's original circular rendering.
- *
- * No overlay, duplicate ImageView, network request, or bitmap re-download.
+ * Diagnostics showed the raw image drawable is already present below the
+ * obfuscated root renderer. CircularImageView.onDraw() is therefore bypassed
+ * before Instagram can apply its circular canvas treatment.
  */
 public final class PfpRendererBypass {
 
     private static final String TAG = "(IE|PFPBypass) ";
 
-    private static final Map<Drawable, WeakReference<View>> ROOT_VIEWS =
-            Collections.synchronizedMap(new WeakHashMap<>());
-
     private static final Map<Drawable, WeakReference<Drawable>> INNER_CACHE =
             Collections.synchronizedMap(new WeakHashMap<>());
 
-    private static final Set<Class<?>> HOOKED_DRAW_CLASSES =
+    private static final Set<Class<?>> HOOKED_VIEW_CLASSES =
             Collections.synchronizedSet(new HashSet<>());
 
-    private static final Set<Drawable> LOGGED_ROOTS =
+    private static final Set<View> LOGGED_VIEWS =
             Collections.newSetFromMap(new WeakHashMap<>());
 
-    private static final Set<Drawable> LOGGED_MISSES =
+    private static final Set<Drawable> LOGGED_INNERS =
             Collections.newSetFromMap(new WeakHashMap<>());
 
     private static volatile boolean installed;
@@ -69,8 +56,8 @@ public final class PfpRendererBypass {
     public static synchronized void install() {
         if (installed) return;
 
-        // Keep the exact expanded profile picture from being clipped back to the
-        // circular outline after we bypass the circular drawable renderer.
+        // View-outline clipping happens outside onDraw(), so keep it disabled
+        // only for the exact expanded profile picture. No parent is touched.
         XposedHelpers.findAndHookMethod(View.class, "setClipToOutline",
                 boolean.class, new XC_MethodHook() {
                     @Override
@@ -86,15 +73,16 @@ public final class PfpRendererBypass {
                     }
                 });
 
-        // Re-arm if Instagram swaps the image drawable after the view has already
-        // attached. The target check keeps this a no-op for every other ImageView.
+        // Instagram can swap the root image drawable after attachment.
         XposedHelpers.findAndHookMethod(ImageView.class, "setImageDrawable",
                 Drawable.class, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         if (!(param.thisObject instanceof View)) return;
+
                         View view = (View) param.thisObject;
                         if (!isExpandedProfilePicture(view)) return;
+
                         view.post(() -> arm(view));
                     }
                 });
@@ -104,8 +92,8 @@ public final class PfpRendererBypass {
     }
 
     /**
-     * Called by the already-working ProfilePicDownloadHook after it has positively
-     * identified resource name expanded_profile_pic.
+     * Called by ProfilePicDownloadHook after it has positively identified
+     * resource name expanded_profile_pic.
      */
     public static void arm(View target) {
         if (!(target instanceof ImageView)) return;
@@ -113,141 +101,116 @@ public final class PfpRendererBypass {
 
         try {
             target.setClipToOutline(false);
+            hookCircularOnDraw(target.getClass());
 
             Drawable root = ((ImageView) target).getDrawable();
-            if (root == null) {
-                target.post(() -> registerCurrentDrawable(target));
-                return;
+            if (root != null) {
+                cacheInner(root);
             }
 
-            registerRoot(target, root);
+            synchronized (LOGGED_VIEWS) {
+                if (LOGGED_VIEWS.add(target)) {
+                    ModuleLog.line(TAG + "armed view=" + target.getClass().getName()
+                            + " size=" + target.getWidth() + "x" + target.getHeight()
+                            + " root=" + (root == null ? "null" : root.getClass().getName()));
+                }
+            }
+
             target.invalidate();
         } catch (Throwable t) {
             ModuleLog.line(TAG + "arm failed: " + t);
         }
     }
 
-    private static void registerCurrentDrawable(View target) {
-        if (!(target instanceof ImageView)) return;
-        if (!isExpandedProfilePicture(target)) return;
+    /**
+     * Hook the concrete CircularImageView.onDraw(Canvas), not Drawable.draw().
+     * This runs before Instagram's own onDraw code can clip/shape the canvas,
+     * while still receiving the framework canvas with the view's existing
+     * translation/scale/animation already applied.
+     */
+    private static void hookCircularOnDraw(Class<?> runtimeClass) {
+        if (runtimeClass == null || !HOOKED_VIEW_CLASSES.add(runtimeClass)) return;
 
-        try {
-            Drawable root = ((ImageView) target).getDrawable();
-            if (root != null) registerRoot(target, root);
-        } catch (Throwable t) {
-            ModuleLog.line(TAG + "late register failed: " + t);
-        }
-    }
-
-    private static void registerRoot(View target, Drawable root) {
-        ROOT_VIEWS.put(root, new WeakReference<>(target));
-        hookDrawClass(root.getClass());
-
-        Candidate candidate = findBestNestedDrawable(root);
-        if (candidate != null && candidate.drawable != null) {
-            INNER_CACHE.put(root, new WeakReference<>(candidate.drawable));
-
-            synchronized (LOGGED_ROOTS) {
-                if (LOGGED_ROOTS.add(root)) {
-                    ModuleLog.line(TAG + "armed root=" + root.getClass().getName()
-                            + " inner=" + candidate.drawable.getClass().getName()
-                            + " path=" + candidate.path
-                            + " intrinsic=" + candidate.drawable.getIntrinsicWidth()
-                            + "x" + candidate.drawable.getIntrinsicHeight());
-                }
-            }
-        } else {
-            synchronized (LOGGED_MISSES) {
-                if (LOGGED_MISSES.add(root)) {
-                    ModuleLog.line(TAG + "root registered but nested image drawable not found yet: "
-                            + root.getClass().getName());
-                }
-            }
-        }
-    }
-
-    private static void hookDrawClass(Class<?> runtimeClass) {
-        if (runtimeClass == null || !HOOKED_DRAW_CLASSES.add(runtimeClass)) return;
-
-        Method draw = findDrawMethod(runtimeClass);
-        if (draw == null) {
-            ModuleLog.line(TAG + "no draw(Canvas) found for " + runtimeClass.getName());
+        Method onDraw = findOnDrawMethod(runtimeClass);
+        if (onDraw == null) {
+            HOOKED_VIEW_CLASSES.remove(runtimeClass);
+            ModuleLog.line(TAG + "no onDraw(Canvas) found for " + runtimeClass.getName());
             return;
         }
 
         try {
-            draw.setAccessible(true);
-            XposedBridge.hookMethod(draw, new XC_MethodHook() {
+            onDraw.setAccessible(true);
+
+            XposedBridge.hookMethod(onDraw, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    if (!(param.thisObject instanceof Drawable)) return;
+                    if (!(param.thisObject instanceof ImageView)) return;
                     if (param.args.length == 0 || !(param.args[0] instanceof Canvas)) return;
 
-                    Drawable root = (Drawable) param.thisObject;
-                    View target = targetForRoot(root);
-                    if (!(target instanceof ImageView)) return;
-                    if (((ImageView) target).getDrawable() != root) return;
-                    if (!isExpandedProfilePicture(target)) return;
+                    ImageView view = (ImageView) param.thisObject;
+                    if (!isExpandedProfilePicture(view)) return;
+
+                    Drawable root = view.getDrawable();
+                    if (root == null) return;
+
+                    Drawable inner = cachedInner(root);
+                    if (inner == null || inner == root) {
+                        Candidate candidate = findBestNestedDrawable(root);
+                        if (candidate != null) {
+                            inner = candidate.drawable;
+                            INNER_CACHE.put(root, new WeakReference<>(inner));
+                            logInner(root, candidate);
+                        }
+                    }
+
+                    if (inner == null || inner == root) {
+                        // Leave Instagram's original onDraw untouched until the
+                        // real image is loaded.
+                        return;
+                    }
 
                     try {
-                        target.setClipToOutline(false);
+                        view.setClipToOutline(false);
 
-                        Drawable inner = cachedInner(root);
-                        if (inner == null) {
-                            Candidate candidate = findBestNestedDrawable(root);
-                            if (candidate != null) {
-                                inner = candidate.drawable;
-                                INNER_CACHE.put(root, new WeakReference<>(inner));
-                                ModuleLog.line(TAG + "late inner="
-                                        + inner.getClass().getName()
-                                        + " path=" + candidate.path
-                                        + " intrinsic=" + inner.getIntrinsicWidth()
-                                        + "x" + inner.getIntrinsicHeight());
-                            }
-                        }
-
-                        if (inner == null || inner == root) {
-                            // Safe fallback: leave Instagram's original draw untouched.
-                            return;
-                        }
-
-                        drawNestedFitCenter(
+                        drawInsideView(
                                 (Canvas) param.args[0],
-                                root.getBounds(),
+                                view,
                                 inner
                         );
 
-                        // Only suppress Instagram's circular wrapper after our
-                        // nested image has been drawn successfully.
+                        // Replacement draw succeeded, so skip CircularImageView's
+                        // original onDraw and its circular canvas/render logic.
                         param.setResult(null);
                     } catch (Throwable t) {
-                        ModuleLog.line(TAG + "draw bypass failed: " + t);
-                        // Do not set a result here, so Instagram falls back to
-                        // its original renderer rather than showing a blank view.
+                        ModuleLog.line(TAG + "onDraw bypass failed: " + t);
+                        // Safe fallback: original Instagram onDraw still runs.
                     }
                 }
             });
 
-            ModuleLog.line(TAG + "hooked " + draw.getDeclaringClass().getName()
-                    + ".draw(Canvas) for " + runtimeClass.getName());
+            ModuleLog.line(TAG + "hooked "
+                    + onDraw.getDeclaringClass().getName()
+                    + ".onDraw(Canvas) for runtime class "
+                    + runtimeClass.getName());
         } catch (Throwable t) {
-            HOOKED_DRAW_CLASSES.remove(runtimeClass);
-            ModuleLog.line(TAG + "draw hook failed for " + runtimeClass.getName() + ": " + t);
+            HOOKED_VIEW_CLASSES.remove(runtimeClass);
+            ModuleLog.line(TAG + "onDraw hook failed for "
+                    + runtimeClass.getName() + ": " + t);
         }
     }
 
-    private static View targetForRoot(Drawable root) {
-        WeakReference<View> ref = ROOT_VIEWS.get(root);
-        return ref == null ? null : ref.get();
-    }
+    /**
+     * Draw only inside the ImageView's own content area. We deliberately do
+     * not save/restore or alter parent/container transforms because the Canvas
+     * supplied to onDraw already contains Instagram's current animation state.
+     */
+    private static void drawInsideView(Canvas canvas, ImageView view, Drawable inner) {
+        int left = view.getPaddingLeft();
+        int top = view.getPaddingTop();
+        int right = view.getWidth() - view.getPaddingRight();
+        int bottom = view.getHeight() - view.getPaddingBottom();
 
-    private static Drawable cachedInner(Drawable root) {
-        WeakReference<Drawable> ref = INNER_CACHE.get(root);
-        return ref == null ? null : ref.get();
-    }
-
-    private static void drawNestedFitCenter(Canvas canvas, Rect rootBounds, Drawable inner) {
-        if (rootBounds == null || rootBounds.isEmpty()) return;
+        if (right <= left || bottom <= top) return;
 
         Rect oldBounds = new Rect(inner.getBounds());
 
@@ -256,36 +219,61 @@ public final class PfpRendererBypass {
 
         Rect dst;
         if (sourceW > 0 && sourceH > 0) {
+            int boxW = right - left;
+            int boxH = bottom - top;
+
+            // FIT_CENTER: reveal the whole square/raw profile image without
+            // cropping while preserving its aspect ratio.
             float scale = Math.min(
-                    rootBounds.width() / (float) sourceW,
-                    rootBounds.height() / (float) sourceH
+                    boxW / (float) sourceW,
+                    boxH / (float) sourceH
             );
 
             int width = Math.max(1, Math.round(sourceW * scale));
             int height = Math.max(1, Math.round(sourceH * scale));
-            int left = rootBounds.left + (rootBounds.width() - width) / 2;
-            int top = rootBounds.top + (rootBounds.height() - height) / 2;
+            int x = left + (boxW - width) / 2;
+            int y = top + (boxH - height) / 2;
 
-            dst = new Rect(left, top, left + width, top + height);
+            dst = new Rect(x, y, x + width, y + height);
         } else {
-            dst = new Rect(rootBounds);
+            dst = new Rect(left, top, right, bottom);
         }
 
-        int save = canvas.save();
         try {
             inner.setBounds(dst);
             inner.draw(canvas);
         } finally {
             inner.setBounds(oldBounds);
-            canvas.restoreToCount(save);
         }
     }
 
+    private static void cacheInner(Drawable root) {
+        Candidate candidate = findBestNestedDrawable(root);
+        if (candidate == null || candidate.drawable == null) return;
+
+        INNER_CACHE.put(root, new WeakReference<>(candidate.drawable));
+        logInner(root, candidate);
+    }
+
+    private static void logInner(Drawable root, Candidate candidate) {
+        synchronized (LOGGED_INNERS) {
+            if (!LOGGED_INNERS.add(root)) return;
+        }
+
+        ModuleLog.line(TAG + "inner=" + candidate.drawable.getClass().getName()
+                + " path=" + candidate.path
+                + " intrinsic=" + candidate.drawable.getIntrinsicWidth()
+                + "x" + candidate.drawable.getIntrinsicHeight());
+    }
+
+    private static Drawable cachedInner(Drawable root) {
+        WeakReference<Drawable> ref = INNER_CACHE.get(root);
+        return ref == null ? null : ref.get();
+    }
+
     /**
-     * Finds Instagram's already-loaded image drawable inside the root rendering
-     * wrapper. The current app version exposes it a few levels down (observed as
-     * X.3cW -> X.3dD -> X.3dO -> X.2sN), but this search intentionally keys off
-     * runtime types/Drawable semantics instead of those obfuscated names.
+     * Locate the already-loaded image drawable inside Instagram's obfuscated
+     * renderer graph without relying on obfuscated class/field names.
      */
     private static Candidate findBestNestedDrawable(Drawable root) {
         Candidate best = new Candidate();
@@ -308,7 +296,6 @@ public final class PfpRendererBypass {
         Class<?> cls = object.getClass();
 
         while (cls != null && cls != Object.class) {
-            // Do not walk framework Drawable internals such as callback/state.
             if (cls == Drawable.class) break;
 
             Field[] fields;
@@ -337,6 +324,7 @@ public final class PfpRendererBypass {
 
                 if (value instanceof Drawable) {
                     Drawable drawable = (Drawable) value;
+
                     if (drawable != root) {
                         int score = scoreDrawable(drawable, depth + 1);
                         if (score > best.score) {
@@ -345,7 +333,7 @@ public final class PfpRendererBypass {
                             best.path = childPath;
                         }
                     }
-                    // A drawable candidate is already a renderable endpoint.
+
                     continue;
                 }
 
@@ -371,8 +359,6 @@ public final class PfpRendererBypass {
 
         int score = 100 - Math.min(depth, 20);
 
-        // Loaded image drawables have real intrinsic dimensions. Decorative
-        // masks/placeholders in this renderer generally do not.
         if (w > 0 && h > 0) {
             score += 100000;
             score += Math.min(50000, Math.min(w, h));
@@ -401,20 +387,16 @@ public final class PfpRendererBypass {
         }
 
         String name = value.getClass().getName();
-
-        // The renderer graph observed in Instagram is composed of obfuscated X.*
-        // classes. Also permit Instagram-owned helper classes, while avoiding
-        // Resources/Context/collections and other huge framework object graphs.
         return name.startsWith("X.")
                 || name.startsWith("com.instagram.");
     }
 
-    private static Method findDrawMethod(Class<?> start) {
+    private static Method findOnDrawMethod(Class<?> start) {
         Class<?> cls = start;
 
         while (cls != null && cls != Object.class) {
             try {
-                return cls.getDeclaredMethod("draw", Canvas.class);
+                return cls.getDeclaredMethod("onDraw", Canvas.class);
             } catch (NoSuchMethodException ignored) {
                 cls = cls.getSuperclass();
             } catch (Throwable t) {
