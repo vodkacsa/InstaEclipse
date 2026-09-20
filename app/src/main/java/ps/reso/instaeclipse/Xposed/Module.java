@@ -200,6 +200,13 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
                     // --- Feature Hooks ---
 
+                    // Temporary runtime Layout Inspector for diagnosing Instagram's avatar renderer.
+                    try {
+                        ps.reso.instaeclipse.mods.devops.RuntimeLayoutInspector.install(lpparam.classLoader);
+                    } catch (Throwable t) {
+                        ModuleLog.line("(IE|LayoutInspector) install failed: " + t);
+                    }
+
                     // Developer Options
                     try {
                         new DevOptionsUnlockHook().handleDevOptions(dexKitBridge);
