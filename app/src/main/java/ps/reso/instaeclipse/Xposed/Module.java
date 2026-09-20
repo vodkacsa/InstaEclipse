@@ -452,14 +452,6 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         ModuleLog.line("(InstaEclipse | ReelDownload): ❌ Failed to hook");
                     }
 
-                    // Profile picture outline-clip test.
-                    // This changes only clipToOutline on the already-known expanded_profile_pic.
-                    try {
-                        ps.reso.instaeclipse.mods.profile.PfpOutlineClipTest.install();
-                    } catch (Throwable t) {
-                        ModuleLog.line("(IE|PFPClipTest) install failed: " + t);
-                    }
-
                     // Profile Picture Download
                     try {
                         ProfilePicDownloadHook.install();
