@@ -452,6 +452,14 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         ModuleLog.line("(InstaEclipse | ReelDownload): ❌ Failed to hook");
                     }
 
+                    // Personal fork: show the entire expanded profile picture using the
+                    // same stable target that ProfilePicDownloadHook already uses.
+                    try {
+                        ps.reso.instaeclipse.mods.profile.ProfilePicUncropHook.install(lpparam.classLoader);
+                    } catch (Throwable t) {
+                        ModuleLog.line("(IE|ProfileUncrop) install failed: " + t);
+                    }
+
                     // Profile Picture Download
                     try {
                         ProfilePicDownloadHook.install();
