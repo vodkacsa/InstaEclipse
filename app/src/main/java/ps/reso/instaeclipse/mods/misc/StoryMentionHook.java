@@ -16,6 +16,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -433,15 +434,17 @@ public class StoryMentionHook {
 
         TextView button = new TextView(activity);
         button.setTag(INLINE_BUTTON_TAG);
-        button.setText("@  " + I18n.t(activity, R.string.ig_btn_view_mentions)
-                + "(" + mentions.size() + ")  ›");
+        button.setText("@ " + I18n.t(activity, R.string.ig_btn_view_mentions)
+                + "(" + mentions.size() + ") ›");
         button.setTextColor(Color.WHITE);
-        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         button.setTypeface(null, Typeface.BOLD);
         button.setSingleLine(true);
+        button.setEllipsize(TextUtils.TruncateAt.END);
+        button.setMaxWidth((int) (160 * dp));
         button.setGravity(Gravity.CENTER);
-        button.setPadding((int) (12 * dp), (int) (6 * dp),
-                (int) (12 * dp), (int) (6 * dp));
+        button.setPadding((int) (10 * dp), (int) (5 * dp),
+                (int) (10 * dp), (int) (5 * dp));
         button.setBackground(roundRect(Color.parseColor("#66000000"), 18, activity, dp));
         button.setElevation(4 * dp);
         button.setContentDescription(I18n.t(activity, R.string.ig_btn_view_mentions)
@@ -559,7 +562,12 @@ public class StoryMentionHook {
 
         for (int level = 0; level < 6; level++) {
             if (!(current.getParent() instanceof ViewGroup parent)) break;
-            fallback = parent;
+
+            if (parent.getWidth() > 0
+                    && parent.getHeight() > 0
+                    && parent.getHeight() <= 140 * dp) {
+                fallback = parent;
+            }
 
             if (parent.getWidth() >= root.getWidth() * 0.72f
                     && parent.getHeight() > 0
