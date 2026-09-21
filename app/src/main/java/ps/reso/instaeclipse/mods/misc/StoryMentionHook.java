@@ -434,7 +434,10 @@ public class StoryMentionHook {
 
         TextView button = new TextView(activity);
         button.setTag(INLINE_BUTTON_TAG);
-        button.setText("@ " + I18n.t(activity, R.string.ig_btn_view_mentions)
+        int mentionLabelRes = mentions.size() == 1
+                ? R.string.ig_btn_view_mention
+                : R.string.ig_btn_view_mentions;
+        button.setText("@ " + I18n.t(activity, mentionLabelRes)
                 + "(" + mentions.size() + ") ›");
         button.setTextColor(Color.WHITE);
         button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
@@ -776,7 +779,9 @@ public class StoryMentionHook {
                 TextView subtitle = new TextView(ctx);
                 subtitle.setText(usernames.isEmpty()
                         ? I18n.t(ctx, R.string.ig_mention_no_mentions)
-                        : I18n.t(ctx, R.string.ig_mention_subtitle, usernames.size()));
+                        : usernames.size() == 1
+                                ? I18n.t(ctx, R.string.ig_mention_subtitle_single)
+                                : I18n.t(ctx, R.string.ig_mention_subtitle, usernames.size()));
                 subtitle.setTextColor(textSec);
                 subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
                 LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
@@ -864,22 +869,41 @@ public class StoryMentionHook {
     private static void openProfile(Context ctx, String username) {
         if (ctx == null || username == null || username.isEmpty()) return;
 
+        Activity activity = findActivity(ctx);
+        Context launchContext = activity != null ? activity : ctx;
         String encoded = Uri.encode(username);
-        try {
-            Intent intent = new Intent(Intent.ACTION_VIEW,
-                    Uri.parse("instagram://user?username=" + encoded));
-            intent.setPackage(ctx.getPackageName());
-            if (!(ctx instanceof Activity)) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            ctx.startActivity(intent);
-            return;
-        } catch (Throwable ignored) {}
+        String hostPackage = launchContext.getPackageName();
 
+        // Deliver the deep link straight to Instagram's own launcher Activity. Using only an
+        // implicit instagram:// intent can resolve successfully yet fail to move the already-open
+        // story viewer, so an explicit launch component is much more reliable in the hooked app.
+        try {
+            Intent intent = launchContext.getPackageManager().getLaunchIntentForPackage(hostPackage);
+            if (intent != null) {
+                intent.setAction(Intent.ACTION_VIEW);
+                intent.setData(Uri.parse("instagram://user?username=" + encoded));
+                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                if (!(launchContext instanceof Activity)) {
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                }
+                launchContext.startActivity(intent);
+                ModuleLog.line("(IE|Mention) opened profile @" + username + " via Instagram activity");
+                return;
+            }
+        } catch (Throwable t) {
+            ModuleLog.line("(IE|Mention) Instagram profile deep link failed for @" + username + ": " + t);
+        }
+
+        // Fallback: let Android open the Instagram web profile if the host launch Activity cannot
+        // be resolved. Do not package-lock this fallback, otherwise a changed IG intent filter can
+        // make the tap appear to do nothing.
         try {
             Intent fallback = new Intent(Intent.ACTION_VIEW,
                     Uri.parse("https://www.instagram.com/" + encoded + "/"));
-            fallback.setPackage(ctx.getPackageName());
-            if (!(ctx instanceof Activity)) fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            ctx.startActivity(fallback);
+            if (!(launchContext instanceof Activity)) {
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            }
+            launchContext.startActivity(fallback);
         } catch (Throwable t) {
             ModuleLog.line("(IE|Mention) ❌ open profile @" + username + ": " + t);
         }
