@@ -455,9 +455,7 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     // Expanded profile picture renderer bypass
                     try {
                         ps.reso.instaeclipse.mods.profile.PfpRendererBypass.install();
-                    } catch (Throwable t) {
-                        ModuleLog.line("(IE|PFPBypass) install failed: " + t);
-                    }
+                    } catch (Throwable ignored) {}
 
                     // Profile Picture Download
                     try {
