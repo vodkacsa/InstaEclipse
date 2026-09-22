@@ -1,12 +1,12 @@
 package ps.reso.instaeclipse.mods.profile;
 
 import android.view.View;
-import android.view.ViewParent;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Collection;
+import java.util.IdentityHashMap;
 import java.util.Map;
 
 import de.robv.android.xposed.XC_MethodHook;
@@ -16,14 +16,18 @@ import ps.reso.instaeclipse.utils.log.ModuleLog;
 /**
  * Temporary diagnostics for the native profile-header PFP click path.
  *
- * This intentionally targets only row_profile_header_imageview_frame_layout,
- * because that is the actual view receiving performClick() on the glitched
- * account. It does not modify click behavior.
+ * Targets only row_profile_header_imageview_frame_layout. The important click
+ * listener is X.0ur, whose A00 field points at the actual Instagram handler
+ * (observed as X.F7m). This version recursively inspects that handler graph
+ * instead of spamming listener-set and parent-chain logs.
  */
 public final class PfpClickDiagnostics {
 
     private static final String TAG = "(IE|PFPClickDiag) ";
     private static final String TARGET_ID = "row_profile_header_imageview_frame_layout";
+
+    private static final int MAX_GRAPH_DEPTH = 4;
+    private static final int MAX_GRAPH_NODES = 48;
 
     private static volatile boolean installed;
 
@@ -36,7 +40,11 @@ public final class PfpClickDiagnostics {
 
         if (!isTarget(view)) return;
 
-        view.post(() -> dumpTarget("attached", view));
+        view.post(() -> {
+            try {
+                ModuleLog.line(TAG + "TARGET " + describe(view));
+            } catch (Throwable ignored) {}
+        });
     }
 
     private static synchronized void installHooksOnce() {
@@ -51,10 +59,10 @@ public final class PfpClickDiagnostics {
                         View clicked = (View) param.thisObject;
                         if (!isTarget(clicked)) return;
 
+                        Object listener = clickListener(clicked);
+
                         ModuleLog.line(TAG + "CLICK_BEFORE " + describe(clicked));
-                        dumpListener("clickListener", clickListener(clicked));
-                        dumpListener("longClickListener", longClickListener(clicked));
-                        dumpParentChain(clicked);
+                        dumpObjectGraph("CLICK_GRAPH", listener);
                     }
 
                     @Override
@@ -65,115 +73,125 @@ public final class PfpClickDiagnostics {
                         if (!isTarget(clicked)) return;
 
                         ModuleLog.line(TAG + "CLICK_AFTER handled="
-                                + String.valueOf(param.getResult())
-                                + " " + describe(clicked));
-                    }
-                });
-
-        XposedHelpers.findAndHookMethod(View.class, "setOnClickListener",
-                View.OnClickListener.class, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (!(param.thisObject instanceof View)) return;
-
-                        View target = (View) param.thisObject;
-                        if (!isTarget(target)) return;
-
-                        ModuleLog.line(TAG + "CLICK_LISTENER_SET " + describe(target));
-                        dumpListener("clickListener", clickListener(target));
-                    }
-                });
-
-        XposedHelpers.findAndHookMethod(View.class, "setOnLongClickListener",
-                View.OnLongClickListener.class, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (!(param.thisObject instanceof View)) return;
-
-                        View target = (View) param.thisObject;
-                        if (!isTarget(target)) return;
-
-                        ModuleLog.line(TAG + "LONG_CLICK_LISTENER_SET " + describe(target));
-                        dumpListener("longClickListener", longClickListener(target));
+                                + String.valueOf(param.getResult()));
                     }
                 });
 
         installed = true;
     }
 
-    private static void dumpTarget(String reason, View target) {
+    private static void dumpObjectGraph(String label, Object root) {
+        if (root == null) {
+            ModuleLog.line(TAG + label + " root=null");
+            return;
+        }
+
         try {
-            ModuleLog.line(TAG + "TARGET reason=" + reason + " " + describe(target));
-            dumpListener("clickListener", clickListener(target));
-            dumpListener("longClickListener", longClickListener(target));
-            dumpParentChain(target);
-        } catch (Throwable ignored) {}
-    }
+            StringBuilder out = new StringBuilder(TAG)
+                    .append(label)
+                    .append(" root=")
+                    .append(root.getClass().getName());
 
-    private static void dumpParentChain(View target) {
-        try {
-            StringBuilder out = new StringBuilder(TAG + "PARENTS");
+            IdentityHashMap<Object, Boolean> visited = new IdentityHashMap<>();
+            int[] nodeCount = new int[]{0};
 
-            View current = target;
-            for (int depth = 0; current != null && depth < 8; depth++) {
-                out.append("\n  [").append(depth).append("] ")
-                        .append(describe(current));
-
-                ViewParent parent = current.getParent();
-                current = parent instanceof View ? (View) parent : null;
-            }
+            appendNode(out, "root", root, 0, visited, nodeCount);
 
             ModuleLog.line(out.toString());
         } catch (Throwable ignored) {}
     }
 
-    /**
-     * Dump only structural listener state. Strings/content are not logged.
-     * Primitive discriminator fields are important because Instagram commonly
-     * reuses one synthetic listener class with an int switch field.
-     */
-    private static void dumpListener(String label, Object listener) {
-        if (listener == null) {
-            ModuleLog.line(TAG + label + "=null");
+    private static void appendNode(
+            StringBuilder out,
+            String path,
+            Object object,
+            int depth,
+            IdentityHashMap<Object, Boolean> visited,
+            int[] nodeCount
+    ) {
+        if (object == null || depth > MAX_GRAPH_DEPTH) return;
+        if (nodeCount[0] >= MAX_GRAPH_NODES) return;
+        if (visited.put(object, Boolean.TRUE) != null) {
+            out.append("\n  ").append(path)
+                    .append(" -> <visited ")
+                    .append(object.getClass().getName())
+                    .append(">");
             return;
         }
 
-        try {
-            StringBuilder out = new StringBuilder();
-            out.append(TAG).append(label)
-                    .append(" class=").append(listener.getClass().getName());
+        nodeCount[0]++;
 
-            Class<?> cls = listener.getClass();
-            int depth = 0;
+        Class<?> runtimeClass = object.getClass();
 
-            while (cls != null && cls != Object.class && depth < 6) {
-                for (Field field : cls.getDeclaredFields()) {
-                    if (Modifier.isStatic(field.getModifiers())) continue;
+        out.append("\n  ").append(path)
+                .append(" class=").append(runtimeClass.getName())
+                .append(" methods=").append(methodSummary(runtimeClass));
 
-                    Object value;
-                    try {
-                        field.setAccessible(true);
-                        value = field.get(listener);
-                    } catch (Throwable t) {
-                        continue;
-                    }
+        Class<?> cls = runtimeClass;
+        int hierarchyDepth = 0;
 
-                    out.append("\n  field ")
-                            .append(cls.getName()).append(".").append(field.getName())
-                            .append(" type=").append(field.getType().getName())
-                            .append(" value=").append(safeValue(value));
-                }
-
+        while (cls != null && cls != Object.class && hierarchyDepth < 6) {
+            Field[] fields;
+            try {
+                fields = cls.getDeclaredFields();
+            } catch (Throwable t) {
                 cls = cls.getSuperclass();
-                depth++;
+                hierarchyDepth++;
+                continue;
             }
 
-            out.append("\n  methods=");
-            Method[] methods = listener.getClass().getDeclaredMethods();
-            boolean first = true;
+            for (Field field : fields) {
+                if (Modifier.isStatic(field.getModifiers())) continue;
+                if (field.isSynthetic()) continue;
+
+                Object value;
+                try {
+                    field.setAccessible(true);
+                    value = field.get(object);
+                } catch (Throwable t) {
+                    continue;
+                }
+
+                String fieldPath = path + "." + field.getName();
+
+                out.append("\n    field ")
+                        .append(fieldPath)
+                        .append(" type=").append(field.getType().getName())
+                        .append(" value=").append(safeValue(value));
+
+                if (shouldRecurse(value)) {
+                    appendNode(
+                            out,
+                            fieldPath,
+                            value,
+                            depth + 1,
+                            visited,
+                            nodeCount
+                    );
+                }
+            }
+
+            cls = cls.getSuperclass();
+            hierarchyDepth++;
+        }
+    }
+
+    private static String methodSummary(Class<?> cls) {
+        try {
+            Method[] methods = cls.getDeclaredMethods();
+            if (methods.length == 0) return "[]";
+
+            StringBuilder out = new StringBuilder("[");
+            int added = 0;
+
             for (Method method : methods) {
-                if (!first) out.append(",");
-                first = false;
+                if (added >= 16) {
+                    out.append(",...");
+                    break;
+                }
+
+                if (added > 0) out.append(",");
+
                 out.append(method.getName()).append("(");
                 Class<?>[] params = method.getParameterTypes();
                 for (int i = 0; i < params.length; i++) {
@@ -181,10 +199,35 @@ public final class PfpClickDiagnostics {
                     out.append(params[i].getName());
                 }
                 out.append(")");
+
+                added++;
             }
 
-            ModuleLog.line(out.toString());
-        } catch (Throwable ignored) {}
+            return out.append("]").toString();
+        } catch (Throwable ignored) {
+            return "[unavailable]";
+        }
+    }
+
+    private static boolean shouldRecurse(Object value) {
+        if (value == null) return false;
+
+        if (value instanceof View
+                || value instanceof CharSequence
+                || value instanceof Number
+                || value instanceof Boolean
+                || value instanceof Character
+                || value instanceof Collection
+                || value instanceof Map
+                || value.getClass().isEnum()
+                || value.getClass().isArray()) {
+            return false;
+        }
+
+        String name = value.getClass().getName();
+
+        return name.startsWith("X.")
+                || name.startsWith("com.instagram.");
     }
 
     private static String safeValue(Object value) {
@@ -234,9 +277,7 @@ public final class PfpClickDiagnostics {
                 + " hasClickListeners=" + safeHasClickListeners(view)
                 + " listener=" + listenerClass(clickListener(view))
                 + " longClickable=" + view.isLongClickable()
-                + " longListener=" + listenerClass(longClickListener(view))
                 + " enabled=" + view.isEnabled()
-                + " focusable=" + view.isFocusable()
                 + " visibility=" + view.getVisibility();
     }
 
@@ -253,18 +294,10 @@ public final class PfpClickDiagnostics {
     }
 
     private static Object clickListener(View view) {
-        return listenerField(view, "mOnClickListener");
-    }
-
-    private static Object longClickListener(View view) {
-        return listenerField(view, "mOnLongClickListener");
-    }
-
-    private static Object listenerField(View view, String fieldName) {
         try {
             Object info = XposedHelpers.getObjectField(view, "mListenerInfo");
             if (info == null) return null;
-            return XposedHelpers.getObjectField(info, fieldName);
+            return XposedHelpers.getObjectField(info, "mOnClickListener");
         } catch (Throwable ignored) {
             return null;
         }
