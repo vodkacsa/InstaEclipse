@@ -77,6 +77,35 @@ public class ProfilePicDownloadHook {
 
                 PfpRendererBypass.arm(v);
 
+                // Diagnostic: dump the expanded PFP view and its parent chain so we can
+                // compare clickable vs non-clickable accounts without guessing obfuscated classes.
+                try {
+                    StringBuilder d = new StringBuilder("(IE|PFPClickDiag) target");
+                    View cur = v;
+                    for (int depth = 0; cur != null && depth < 8; depth++) {
+                        String res = "NO_ID";
+                        try {
+                            if (cur.getId() != View.NO_ID) {
+                                res = cur.getResources().getResourceEntryName(cur.getId());
+                            }
+                        } catch (Throwable ignored) {}
+                        d.append("\\n  [").append(depth).append("] ")
+                                .append(cur.getClass().getName())
+                                .append(" id=").append(res)
+                                .append(" clickable=").append(cur.isClickable())
+                                .append(" longClickable=").append(cur.isLongClickable())
+                                .append(" enabled=").append(cur.isEnabled())
+                                .append(" focusable=").append(cur.isFocusable())
+                                .append(" visibility=").append(cur.getVisibility())
+                                .append(" listener=").append(hasClickListener(cur));
+                        android.view.ViewParent parent = cur.getParent();
+                        cur = parent instanceof View ? (View) parent : null;
+                    }
+                    ModuleLog.line(d.toString());
+                } catch (Throwable t) {
+                    ModuleLog.line("(IE|PFPClickDiag) failed: " + t);
+                }
+
                 if (!FeatureFlags.enableProfileDownload) return;
                 injectLongPress(v);
             }
@@ -121,6 +150,17 @@ public class ProfilePicDownloadHook {
 
         } catch (Throwable t) {
             ModuleLog.line("(IE|ProfileDL) ❌ injectLongPress: " + t.getMessage());
+        }
+    }
+
+    private static boolean hasClickListener(View view) {
+        try {
+            Object info = XposedHelpers.getObjectField(view, "mListenerInfo");
+            if (info == null) return false;
+            Object listener = XposedHelpers.getObjectField(info, "mOnClickListener");
+            return listener != null;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
