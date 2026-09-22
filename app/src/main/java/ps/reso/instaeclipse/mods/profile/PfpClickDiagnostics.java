@@ -1,33 +1,43 @@
 package ps.reso.instaeclipse.mods.profile;
 
+import android.graphics.Bitmap;
+import android.graphics.drawable.Drawable;
+import android.view.LayoutInflater;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewPropertyAnimator;
+import android.view.animation.Animation;
+import android.widget.ImageView;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
-import java.util.Collection;
-import java.util.IdentityHashMap;
-import java.util.Map;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import ps.reso.instaeclipse.utils.log.ModuleLog;
 
 /**
  * Temporary diagnostics for the native profile-header PFP click path.
  *
- * Targets only row_profile_header_imageview_frame_layout. The important click
- * listener is X.0ur, whose A00 field points at the actual Instagram handler
- * (observed as X.F7m). This version recursively inspects that handler graph
- * instead of spamming listener-set and parent-chain logs.
+ * The listener/delegate graph is identical on working and glitched accounts,
+ * so this traces what Instagram's actual delegate does during onClick().
+ * Only UI mutations that happen synchronously while that handler is executing
+ * are logged.
  */
 public final class PfpClickDiagnostics {
 
     private static final String TAG = "(IE|PFPClickDiag) ";
     private static final String TARGET_ID = "row_profile_header_imageview_frame_layout";
 
-    private static final int MAX_GRAPH_DEPTH = 4;
-    private static final int MAX_GRAPH_NODES = 48;
+    private static final ThreadLocal<Integer> HANDLER_DEPTH =
+            ThreadLocal.withInitial(() -> 0);
+
+    private static final Set<Class<?>> HOOKED_HANDLER_CLASSES =
+            Collections.synchronizedSet(new HashSet<>());
 
     private static volatile boolean installed;
 
@@ -42,7 +52,15 @@ public final class PfpClickDiagnostics {
 
         view.post(() -> {
             try {
-                ModuleLog.line(TAG + "TARGET " + describe(view));
+                Object listener = clickListener(view);
+                Object delegate = unwrapDelegate(listener);
+
+                ModuleLog.line(TAG + "TARGET"
+                        + " listener=" + className(listener)
+                        + " delegate=" + className(delegate)
+                        + " " + describe(view));
+
+                hookHandler(delegate);
             } catch (Throwable ignored) {}
         });
     }
@@ -60,9 +78,13 @@ public final class PfpClickDiagnostics {
                         if (!isTarget(clicked)) return;
 
                         Object listener = clickListener(clicked);
+                        Object delegate = unwrapDelegate(listener);
+                        hookHandler(delegate);
 
-                        ModuleLog.line(TAG + "CLICK_BEFORE " + describe(clicked));
-                        dumpObjectGraph("CLICK_GRAPH", listener);
+                        ModuleLog.line(TAG + "CLICK_BEFORE"
+                                + " listener=" + className(listener)
+                                + " delegate=" + className(delegate)
+                                + " " + describe(clicked));
                     }
 
                     @Override
@@ -77,223 +99,295 @@ public final class PfpClickDiagnostics {
                     }
                 });
 
+        installUiMutationHooks();
+
         installed = true;
     }
 
-    private static void dumpObjectGraph(String label, Object root) {
-        if (root == null) {
-            ModuleLog.line(TAG + label + " root=null");
+    private static void hookHandler(Object delegate) {
+        if (!(delegate instanceof View.OnClickListener)) return;
+
+        Class<?> cls = delegate.getClass();
+        if (!HOOKED_HANDLER_CLASSES.add(cls)) return;
+
+        Method onClick;
+        try {
+            onClick = cls.getDeclaredMethod("onClick", View.class);
+            onClick.setAccessible(true);
+        } catch (Throwable t) {
+            HOOKED_HANDLER_CLASSES.remove(cls);
             return;
         }
 
         try {
-            StringBuilder out = new StringBuilder(TAG)
-                    .append(label)
-                    .append(" root=")
-                    .append(root.getClass().getName());
+            XposedBridge.hookMethod(onClick, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    HANDLER_DEPTH.set(HANDLER_DEPTH.get() + 1);
 
-            IdentityHashMap<Object, Boolean> visited = new IdentityHashMap<>();
-            int[] nodeCount = new int[]{0};
+                    ModuleLog.line(TAG + "HANDLER_BEGIN class="
+                            + param.thisObject.getClass().getName());
+                }
 
-            appendNode(out, "root", root, 0, visited, nodeCount);
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    ModuleLog.line(TAG + "HANDLER_END class="
+                            + param.thisObject.getClass().getName()
+                            + " threw=" + (param.hasThrowable()
+                            ? param.getThrowable().getClass().getName()
+                            : "none"));
 
-            ModuleLog.line(out.toString());
+                    int depth = HANDLER_DEPTH.get() - 1;
+                    if (depth <= 0) {
+                        HANDLER_DEPTH.remove();
+                    } else {
+                        HANDLER_DEPTH.set(depth);
+                    }
+                }
+            });
+
+            ModuleLog.line(TAG + "HANDLER_HOOKED class=" + cls.getName());
+        } catch (Throwable t) {
+            HOOKED_HANDLER_CLASSES.remove(cls);
+        }
+    }
+
+    private static void installUiMutationHooks() {
+        XposedHelpers.findAndHookMethod(View.class, "setVisibility",
+                int.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!handlerActive()) return;
+                        View v = (View) param.thisObject;
+                        logAction("setVisibility",
+                                v,
+                                "from=" + v.getVisibility()
+                                        + " to=" + String.valueOf(param.args[0]));
+                    }
+                });
+
+        hookFloatSetter(View.class, "setAlpha");
+        hookFloatSetter(View.class, "setScaleX");
+        hookFloatSetter(View.class, "setScaleY");
+        hookFloatSetter(View.class, "setTranslationX");
+        hookFloatSetter(View.class, "setTranslationY");
+
+        XposedHelpers.findAndHookMethod(View.class, "startAnimation",
+                Animation.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!handlerActive()) return;
+                        View v = (View) param.thisObject;
+                        Object animation = param.args[0];
+                        logAction("startAnimation",
+                                v,
+                                "animation=" + className(animation));
+                    }
+                });
+
+        XposedHelpers.findAndHookMethod(View.class, "post",
+                Runnable.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!handlerActive()) return;
+                        View v = (View) param.thisObject;
+                        logAction("post",
+                                v,
+                                "runnable=" + className(param.args[0]));
+                    }
+                });
+
+        XposedHelpers.findAndHookMethod(ImageView.class, "setImageDrawable",
+                Drawable.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!handlerActive()) return;
+                        ImageView v = (ImageView) param.thisObject;
+                        logAction("setImageDrawable",
+                                v,
+                                "drawable=" + className(param.args[0]));
+                    }
+                });
+
+        XposedHelpers.findAndHookMethod(ImageView.class, "setImageBitmap",
+                Bitmap.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!handlerActive()) return;
+                        ImageView v = (ImageView) param.thisObject;
+                        Bitmap bitmap = (Bitmap) param.args[0];
+                        String detail = bitmap == null
+                                ? "bitmap=null"
+                                : "bitmap=" + bitmap.getWidth() + "x" + bitmap.getHeight();
+                        logAction("setImageBitmap", v, detail);
+                    }
+                });
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    LayoutInflater.class,
+                    "inflate",
+                    int.class,
+                    ViewGroup.class,
+                    boolean.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!handlerActive()) return;
+
+                            int layoutId = (Integer) param.args[0];
+                            String layoutName = "0x" + Integer.toHexString(layoutId);
+
+                            try {
+                                LayoutInflater inflater = (LayoutInflater) param.thisObject;
+                                layoutName = inflater.getContext()
+                                        .getResources()
+                                        .getResourceEntryName(layoutId);
+                            } catch (Throwable ignored) {}
+
+                            ModuleLog.line(TAG + "ACTION inflate"
+                                    + " layout=" + layoutName
+                                    + " parent=" + describeNullable((View) param.args[1])
+                                    + " attach=" + String.valueOf(param.args[2]));
+                        }
+                    });
+        } catch (Throwable ignored) {}
+
+        try {
+            for (Method method : ViewGroup.class.getDeclaredMethods()) {
+                if (!"addView".equals(method.getName())) continue;
+
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!handlerActive()) return;
+
+                        ViewGroup parent = (ViewGroup) param.thisObject;
+                        View child = null;
+
+                        for (Object arg : param.args) {
+                            if (arg instanceof View) {
+                                child = (View) arg;
+                                break;
+                            }
+                        }
+
+                        ModuleLog.line(TAG + "ACTION addView"
+                                + " parent=" + describe(parent)
+                                + " child=" + describeNullable(child));
+                    }
+                });
+            }
+        } catch (Throwable ignored) {}
+
+        hookAnimatorSetter("alpha");
+        hookAnimatorSetter("scaleX");
+        hookAnimatorSetter("scaleY");
+        hookAnimatorSetter("translationX");
+        hookAnimatorSetter("translationY");
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    ViewPropertyAnimator.class,
+                    "setDuration",
+                    long.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!handlerActive()) return;
+                            ModuleLog.line(TAG + "ACTION animator.setDuration value="
+                                    + String.valueOf(param.args[0]));
+                        }
+                    });
+        } catch (Throwable ignored) {}
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    ViewPropertyAnimator.class,
+                    "start",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!handlerActive()) return;
+                            ModuleLog.line(TAG + "ACTION animator.start");
+                        }
+                    });
         } catch (Throwable ignored) {}
     }
 
-    private static void appendNode(
-            StringBuilder out,
-            String path,
-            Object object,
-            int depth,
-            IdentityHashMap<Object, Boolean> visited,
-            int[] nodeCount
-    ) {
-        if (object == null || depth > MAX_GRAPH_DEPTH) return;
-        if (nodeCount[0] >= MAX_GRAPH_NODES) return;
-        if (visited.put(object, Boolean.TRUE) != null) {
-            out.append("\n  ").append(path)
-                    .append(" -> <visited ")
-                    .append(object.getClass().getName())
-                    .append(">");
-            return;
-        }
-
-        nodeCount[0]++;
-
-        Class<?> runtimeClass = object.getClass();
-
-        out.append("\n  ").append(path)
-                .append(" class=").append(runtimeClass.getName())
-                .append(" methods=").append(methodSummary(runtimeClass));
-
-        Class<?> cls = runtimeClass;
-        int hierarchyDepth = 0;
-
-        while (cls != null && cls != Object.class && hierarchyDepth < 6) {
-            Field[] fields;
-            try {
-                fields = cls.getDeclaredFields();
-            } catch (Throwable t) {
-                cls = cls.getSuperclass();
-                hierarchyDepth++;
-                continue;
-            }
-
-            for (Field field : fields) {
-                if (Modifier.isStatic(field.getModifiers())) continue;
-
-                // Do not skip synthetic capture fields here. Instagram's
-                // generated click-listener wrappers store the real handler
-                // (for example X.F7m) in synthetic fields such as A00.
-
-                Object value;
-                try {
-                    field.setAccessible(true);
-                    value = field.get(object);
-                } catch (Throwable t) {
-                    continue;
-                }
-
-                String fieldPath = path + "." + field.getName();
-
-                out.append("\n    field ")
-                        .append(fieldPath)
-                        .append(" type=").append(field.getType().getName())
-                        .append(" value=").append(safeValue(value));
-
-                if (shouldRecurse(value)) {
-                    appendNode(
-                            out,
-                            fieldPath,
-                            value,
-                            depth + 1,
-                            visited,
-                            nodeCount
-                    );
-                }
-            }
-
-            cls = cls.getSuperclass();
-            hierarchyDepth++;
-        }
-    }
-
-    private static String methodSummary(Class<?> cls) {
+    private static void hookFloatSetter(Class<?> cls, String methodName) {
         try {
-            Method[] methods = cls.getDeclaredMethods();
-            if (methods.length == 0) return "[]";
+            XposedHelpers.findAndHookMethod(
+                    cls,
+                    methodName,
+                    float.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!handlerActive()) return;
+                            View v = (View) param.thisObject;
+                            logAction(methodName,
+                                    v,
+                                    "value=" + String.valueOf(param.args[0]));
+                        }
+                    });
+        } catch (Throwable ignored) {}
+    }
 
-            StringBuilder out = new StringBuilder("[");
-            int added = 0;
+    private static void hookAnimatorSetter(String methodName) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                    ViewPropertyAnimator.class,
+                    methodName,
+                    float.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!handlerActive()) return;
+                            ModuleLog.line(TAG + "ACTION animator."
+                                    + methodName
+                                    + " value=" + String.valueOf(param.args[0]));
+                        }
+                    });
+        } catch (Throwable ignored) {}
+    }
 
-            for (Method method : methods) {
-                if (added >= 16) {
-                    out.append(",...");
-                    break;
-                }
+    private static boolean handlerActive() {
+        Integer depth = HANDLER_DEPTH.get();
+        return depth != null && depth > 0;
+    }
 
-                if (added > 0) out.append(",");
+    private static void logAction(String action, View view, String detail) {
+        ModuleLog.line(TAG + "ACTION " + action
+                + " " + describe(view)
+                + " " + detail);
+    }
 
-                out.append(method.getName()).append("(");
-                Class<?>[] params = method.getParameterTypes();
-                for (int i = 0; i < params.length; i++) {
-                    if (i > 0) out.append(",");
-                    out.append(params[i].getName());
-                }
-                out.append(")");
+    private static Object unwrapDelegate(Object listener) {
+        if (listener == null) return null;
 
-                added++;
-            }
-
-            return out.append("]").toString();
+        try {
+            Field field = listener.getClass().getDeclaredField("A00");
+            field.setAccessible(true);
+            return field.get(listener);
         } catch (Throwable ignored) {
-            return "[unavailable]";
+            return null;
         }
-    }
-
-    private static boolean shouldRecurse(Object value) {
-        if (value == null) return false;
-
-        if (value instanceof View
-                || value instanceof CharSequence
-                || value instanceof Number
-                || value instanceof Boolean
-                || value instanceof Character
-                || value instanceof Collection
-                || value instanceof Map
-                || value.getClass().isEnum()
-                || value.getClass().isArray()) {
-            return false;
-        }
-
-        String name = value.getClass().getName();
-
-        return name.startsWith("X.")
-                || name.startsWith("com.instagram.");
-    }
-
-    private static String safeValue(Object value) {
-        if (value == null) return "null";
-
-        if (value instanceof Number
-                || value instanceof Boolean
-                || value instanceof Character
-                || value.getClass().isEnum()) {
-            return String.valueOf(value);
-        }
-
-        if (value instanceof CharSequence) {
-            return value.getClass().getName() + "(length="
-                    + ((CharSequence) value).length() + ")";
-        }
-
-        if (value instanceof View) {
-            View v = (View) value;
-            return "View(class=" + v.getClass().getName()
-                    + ",id=" + resourceName(v) + ")";
-        }
-
-        if (value instanceof Collection) {
-            return value.getClass().getName()
-                    + "(size=" + ((Collection<?>) value).size() + ")";
-        }
-
-        if (value instanceof Map) {
-            return value.getClass().getName()
-                    + "(size=" + ((Map<?, ?>) value).size() + ")";
-        }
-
-        if (value.getClass().isArray()) {
-            return value.getClass().getName()
-                    + "(length=" + java.lang.reflect.Array.getLength(value) + ")";
-        }
-
-        return "object(" + value.getClass().getName() + ")";
     }
 
     private static String describe(View view) {
         return "class=" + view.getClass().getName()
                 + " id=" + resourceName(view)
                 + " size=" + view.getWidth() + "x" + view.getHeight()
-                + " clickable=" + view.isClickable()
-                + " hasClickListeners=" + safeHasClickListeners(view)
-                + " listener=" + listenerClass(clickListener(view))
-                + " longClickable=" + view.isLongClickable()
-                + " enabled=" + view.isEnabled()
                 + " visibility=" + view.getVisibility();
+    }
+
+    private static String describeNullable(View view) {
+        return view == null ? "null" : describe(view);
     }
 
     private static boolean isTarget(View view) {
         return TARGET_ID.equals(resourceName(view));
-    }
-
-    private static boolean safeHasClickListeners(View view) {
-        try {
-            return view.hasOnClickListeners();
-        } catch (Throwable ignored) {
-            return false;
-        }
     }
 
     private static Object clickListener(View view) {
@@ -306,8 +400,8 @@ public final class PfpClickDiagnostics {
         }
     }
 
-    private static String listenerClass(Object listener) {
-        return listener == null ? "null" : listener.getClass().getName();
+    private static String className(Object value) {
+        return value == null ? "null" : value.getClass().getName();
     }
 
     private static String resourceName(View view) {
