@@ -142,7 +142,10 @@ public final class PfpClickDiagnostics {
 
             for (Field field : fields) {
                 if (Modifier.isStatic(field.getModifiers())) continue;
-                if (field.isSynthetic()) continue;
+
+                // Do not skip synthetic capture fields here. Instagram's
+                // generated click-listener wrappers store the real handler
+                // (for example X.F7m) in synthetic fields such as A00.
 
                 Object value;
                 try {
