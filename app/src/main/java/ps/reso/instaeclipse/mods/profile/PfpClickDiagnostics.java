@@ -1,12 +1,9 @@
 package ps.reso.instaeclipse.mods.profile;
 
-import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewPropertyAnimator;
-import android.view.animation.Animation;
 import android.widget.ImageView;
 
 import java.lang.reflect.Field;
@@ -23,15 +20,17 @@ import ps.reso.instaeclipse.utils.log.ModuleLog;
 /**
  * Temporary diagnostics for the native profile-header PFP click path.
  *
- * The listener/delegate graph is identical on working and glitched accounts,
- * so this traces what Instagram's actual delegate does during onClick().
- * Only UI mutations that happen synchronously while that handler is executing
- * are logged.
+ * Working accounts enter X.F7m.onClick() and inflate
+ * layout_expanded_profile_picture_view. Glitched accounts enter the same
+ * handler and return immediately without touching the UI. This version records
+ * the exact handler input view state and the stack that reaches the native
+ * expanded-view inflate on a working account.
  */
 public final class PfpClickDiagnostics {
 
     private static final String TAG = "(IE|PFPClickDiag) ";
     private static final String TARGET_ID = "row_profile_header_imageview_frame_layout";
+    private static final String EXPANDED_LAYOUT = "layout_expanded_profile_picture_view";
 
     private static final ThreadLocal<Integer> HANDLER_DEPTH =
             ThreadLocal.withInitial(() -> 0);
@@ -99,7 +98,7 @@ public final class PfpClickDiagnostics {
                     }
                 });
 
-        installUiMutationHooks();
+        installInflaterTrace();
 
         installed = true;
     }
@@ -125,8 +124,18 @@ public final class PfpClickDiagnostics {
                 protected void beforeHookedMethod(MethodHookParam param) {
                     HANDLER_DEPTH.set(HANDLER_DEPTH.get() + 1);
 
+                    View input = null;
+                    if (param.args.length > 0 && param.args[0] instanceof View) {
+                        input = (View) param.args[0];
+                    }
+
                     ModuleLog.line(TAG + "HANDLER_BEGIN class="
-                            + param.thisObject.getClass().getName());
+                            + param.thisObject.getClass().getName()
+                            + " input=" + describeNullable(input));
+
+                    if (input != null) {
+                        dumpInputTree(input);
+                    }
                 }
 
                 @Override
@@ -152,77 +161,7 @@ public final class PfpClickDiagnostics {
         }
     }
 
-    private static void installUiMutationHooks() {
-        XposedHelpers.findAndHookMethod(View.class, "setVisibility",
-                int.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!handlerActive()) return;
-                        View v = (View) param.thisObject;
-                        logAction("setVisibility",
-                                v,
-                                "from=" + v.getVisibility()
-                                        + " to=" + String.valueOf(param.args[0]));
-                    }
-                });
-
-        hookFloatSetter(View.class, "setAlpha");
-        hookFloatSetter(View.class, "setScaleX");
-        hookFloatSetter(View.class, "setScaleY");
-        hookFloatSetter(View.class, "setTranslationX");
-        hookFloatSetter(View.class, "setTranslationY");
-
-        XposedHelpers.findAndHookMethod(View.class, "startAnimation",
-                Animation.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!handlerActive()) return;
-                        View v = (View) param.thisObject;
-                        Object animation = param.args[0];
-                        logAction("startAnimation",
-                                v,
-                                "animation=" + className(animation));
-                    }
-                });
-
-        XposedHelpers.findAndHookMethod(View.class, "post",
-                Runnable.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!handlerActive()) return;
-                        View v = (View) param.thisObject;
-                        logAction("post",
-                                v,
-                                "runnable=" + className(param.args[0]));
-                    }
-                });
-
-        XposedHelpers.findAndHookMethod(ImageView.class, "setImageDrawable",
-                Drawable.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!handlerActive()) return;
-                        ImageView v = (ImageView) param.thisObject;
-                        logAction("setImageDrawable",
-                                v,
-                                "drawable=" + className(param.args[0]));
-                    }
-                });
-
-        XposedHelpers.findAndHookMethod(ImageView.class, "setImageBitmap",
-                Bitmap.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!handlerActive()) return;
-                        ImageView v = (ImageView) param.thisObject;
-                        Bitmap bitmap = (Bitmap) param.args[0];
-                        String detail = bitmap == null
-                                ? "bitmap=null"
-                                : "bitmap=" + bitmap.getWidth() + "x" + bitmap.getHeight();
-                        logAction("setImageBitmap", v, detail);
-                    }
-                });
-
+    private static void installInflaterTrace() {
         try {
             XposedHelpers.findAndHookMethod(
                     LayoutInflater.class,
@@ -236,131 +175,134 @@ public final class PfpClickDiagnostics {
                             if (!handlerActive()) return;
 
                             int layoutId = (Integer) param.args[0];
-                            String layoutName = "0x" + Integer.toHexString(layoutId);
+                            String layoutName = resourceName(
+                                    (LayoutInflater) param.thisObject,
+                                    layoutId
+                            );
 
-                            try {
-                                LayoutInflater inflater = (LayoutInflater) param.thisObject;
-                                layoutName = inflater.getContext()
-                                        .getResources()
-                                        .getResourceEntryName(layoutId);
-                            } catch (Throwable ignored) {}
+                            if (!EXPANDED_LAYOUT.equals(layoutName)) return;
 
-                            ModuleLog.line(TAG + "ACTION inflate"
+                            ModuleLog.line(TAG + "OPEN_INFLATE"
                                     + " layout=" + layoutName
                                     + " parent=" + describeNullable((View) param.args[1])
                                     + " attach=" + String.valueOf(param.args[2]));
+
+                            dumpOpenStack();
                         }
                     });
         } catch (Throwable ignored) {}
+    }
 
+    private static void dumpOpenStack() {
         try {
-            for (Method method : ViewGroup.class.getDeclaredMethods()) {
-                if (!"addView".equals(method.getName())) continue;
+            StringBuilder out = new StringBuilder(TAG + "OPEN_STACK");
 
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!handlerActive()) return;
+            StackTraceElement[] stack = new Throwable().getStackTrace();
+            int added = 0;
 
-                        ViewGroup parent = (ViewGroup) param.thisObject;
-                        View child = null;
+            for (StackTraceElement frame : stack) {
+                String cls = frame.getClassName();
 
-                        for (Object arg : param.args) {
-                            if (arg instanceof View) {
-                                child = (View) arg;
-                                break;
-                            }
-                        }
+                if (cls.equals(PfpClickDiagnostics.class.getName())
+                        || cls.startsWith("de.robv.android.xposed.")
+                        || cls.startsWith("java.lang.reflect.")
+                        || cls.startsWith("sun.reflect.")) {
+                    continue;
+                }
 
-                        ModuleLog.line(TAG + "ACTION addView"
-                                + " parent=" + describe(parent)
-                                + " child=" + describeNullable(child));
-                    }
-                });
+                out.append("\n  ")
+                        .append(cls)
+                        .append(".")
+                        .append(frame.getMethodName())
+                        .append(":")
+                        .append(frame.getLineNumber());
+
+                added++;
+                if (added >= 30) break;
             }
-        } catch (Throwable ignored) {}
 
-        hookAnimatorSetter("alpha");
-        hookAnimatorSetter("scaleX");
-        hookAnimatorSetter("scaleY");
-        hookAnimatorSetter("translationX");
-        hookAnimatorSetter("translationY");
-
-        try {
-            XposedHelpers.findAndHookMethod(
-                    ViewPropertyAnimator.class,
-                    "setDuration",
-                    long.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            if (!handlerActive()) return;
-                            ModuleLog.line(TAG + "ACTION animator.setDuration value="
-                                    + String.valueOf(param.args[0]));
-                        }
-                    });
-        } catch (Throwable ignored) {}
-
-        try {
-            XposedHelpers.findAndHookMethod(
-                    ViewPropertyAnimator.class,
-                    "start",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            if (!handlerActive()) return;
-                            ModuleLog.line(TAG + "ACTION animator.start");
-                        }
-                    });
+            ModuleLog.line(out.toString());
         } catch (Throwable ignored) {}
     }
 
-    private static void hookFloatSetter(Class<?> cls, String methodName) {
+    private static void dumpInputTree(View root) {
         try {
-            XposedHelpers.findAndHookMethod(
-                    cls,
-                    methodName,
-                    float.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            if (!handlerActive()) return;
-                            View v = (View) param.thisObject;
-                            logAction(methodName,
-                                    v,
-                                    "value=" + String.valueOf(param.args[0]));
-                        }
-                    });
+            StringBuilder out = new StringBuilder(TAG + "INPUT_TREE");
+            appendView(out, root, "root", 0);
+            ModuleLog.line(out.toString());
         } catch (Throwable ignored) {}
     }
 
-    private static void hookAnimatorSetter(String methodName) {
+    private static void appendView(StringBuilder out, View view, String path, int depth) {
+        if (view == null || depth > 4) return;
+
+        out.append("\n  ").append(path)
+                .append(" ").append(describeDetailed(view));
+
+        if (!(view instanceof ViewGroup)) return;
+
+        ViewGroup group = (ViewGroup) view;
+        int count;
         try {
-            XposedHelpers.findAndHookMethod(
-                    ViewPropertyAnimator.class,
-                    methodName,
-                    float.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            if (!handlerActive()) return;
-                            ModuleLog.line(TAG + "ACTION animator."
-                                    + methodName
-                                    + " value=" + String.valueOf(param.args[0]));
-                        }
-                    });
+            count = group.getChildCount();
+        } catch (Throwable t) {
+            return;
+        }
+
+        int limit = Math.min(count, 24);
+        for (int i = 0; i < limit; i++) {
+            View child;
+            try {
+                child = group.getChildAt(i);
+            } catch (Throwable t) {
+                continue;
+            }
+
+            appendView(out, child, path + "[" + i + "]", depth + 1);
+        }
+
+        if (count > limit) {
+            out.append("\n  ").append(path)
+                    .append(" childrenTruncated=")
+                    .append(count - limit);
+        }
+    }
+
+    private static String describeDetailed(View view) {
+        StringBuilder out = new StringBuilder(describe(view));
+
+        try {
+            Object tag = view.getTag();
+            out.append(" tag=").append(className(tag));
+        } catch (Throwable ignored) {
+            out.append(" tag=<error>");
+        }
+
+        try {
+            out.append(" selected=").append(view.isSelected());
+            out.append(" activated=").append(view.isActivated());
+            out.append(" pressed=").append(view.isPressed());
+            out.append(" alpha=").append(view.getAlpha());
         } catch (Throwable ignored) {}
+
+        try {
+            Drawable background = view.getBackground();
+            out.append(" background=").append(className(background));
+        } catch (Throwable ignored) {}
+
+        if (view instanceof ImageView) {
+            try {
+                Drawable drawable = ((ImageView) view).getDrawable();
+                out.append(" drawable=").append(className(drawable));
+            } catch (Throwable ignored) {}
+        }
+
+        return out.toString();
     }
 
     private static boolean handlerActive() {
         Integer depth = HANDLER_DEPTH.get();
         return depth != null && depth > 0;
-    }
-
-    private static void logAction(String action, View view, String detail) {
-        ModuleLog.line(TAG + "ACTION " + action
-                + " " + describe(view)
-                + " " + detail);
     }
 
     private static Object unwrapDelegate(Object listener) {
@@ -379,7 +321,9 @@ public final class PfpClickDiagnostics {
         return "class=" + view.getClass().getName()
                 + " id=" + resourceName(view)
                 + " size=" + view.getWidth() + "x" + view.getHeight()
-                + " visibility=" + view.getVisibility();
+                + " visibility=" + view.getVisibility()
+                + " enabled=" + view.isEnabled()
+                + " clickable=" + view.isClickable();
     }
 
     private static String describeNullable(View view) {
@@ -402,6 +346,14 @@ public final class PfpClickDiagnostics {
 
     private static String className(Object value) {
         return value == null ? "null" : value.getClass().getName();
+    }
+
+    private static String resourceName(LayoutInflater inflater, int id) {
+        try {
+            return inflater.getContext().getResources().getResourceEntryName(id);
+        } catch (Throwable ignored) {
+            return "0x" + Integer.toHexString(id);
+        }
     }
 
     private static String resourceName(View view) {
