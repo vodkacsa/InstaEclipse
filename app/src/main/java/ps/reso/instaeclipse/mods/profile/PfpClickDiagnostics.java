@@ -1,26 +1,15 @@
 package ps.reso.instaeclipse.mods.profile;
 
-import android.content.ContentValues;
+import android.app.Activity;
 import android.content.Context;
-import android.net.Uri;
-import android.os.Build;
-import android.os.Environment;
-import android.provider.MediaStore;
-import android.graphics.drawable.Drawable;
-import android.view.LayoutInflater;
+import android.content.ContextWrapper;
+import android.graphics.Rect;
+import android.os.SystemClock;
+import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.ViewParent;
-import android.widget.ImageView;
-import android.widget.Toast;
 
-import java.io.OutputStream;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.nio.charset.StandardCharsets;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.List;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -28,36 +17,32 @@ import de.robv.android.xposed.XposedHelpers;
 import ps.reso.instaeclipse.utils.log.ModuleLog;
 
 /**
- * Temporary diagnostics for the native profile-header PFP click path.
+ * Native profile-picture click fallback.
  *
- * Working accounts enter X.F7m.onClick() and inflate
- * layout_expanded_profile_picture_view. Glitched accounts enter the same
- * handler and return immediately without touching the UI. This version records
- * the exact handler input view state and the stack that reaches the native
- * expanded-view inflate on a working account.
+ * Some profiles install the same native X.F7m click handler as normal profiles,
+ * but that handler returns immediately before reaching UserDetailFragment.GLY().
+ * A known-good native open path is:
+ *
+ * X.F7m.onClick -> ... -> UserDetailFragment.GLY -> X.DUO.GLY ->
+ * X.DUO.A00 -> layout_expanded_profile_picture_view
+ *
+ * Instead of trying to patch the profile's clickability state, this watches the
+ * Activity-level touch stream. If a tap lands on the header PFP and Instagram
+ * did not open the native expanded viewer itself, it invokes the current
+ * UserDetailFragment.GLY() directly. This keeps Instagram's own viewer,
+ * animations, image loading and PfpRendererBypass intact.
  */
 public final class PfpClickDiagnostics {
 
-    private static final String TAG = "(IE|PFPClickDiag) ";
+    private static final String TAG = "(IE|PFPClickPatch) ";
     private static final String TARGET_ID = "row_profile_header_imageview_frame_layout";
-    private static final String EXPANDED_LAYOUT = "layout_expanded_profile_picture_view";
-    private static final String CONTENT_ID = "content";
-
-    private static final ThreadLocal<Integer> HANDLER_DEPTH =
-            ThreadLocal.withInitial(() -> 0);
-
-    private static final ThreadLocal<Integer> ACTIVE_TEST = new ThreadLocal<>();
-
-    private static final Object PHONE_BUFFER_LOCK = new Object();
-    private static final StringBuilder PHONE_BUFFER = new StringBuilder();
-    private static int nextTestNumber = 1;
-
-    private static final Set<Class<?>> HOOKED_HANDLER_CLASSES =
-            Collections.synchronizedSet(new HashSet<>());
+    private static final String EXPANDED_ROOT_ID = "touch_interceptor_expanded_profile_pic";
+    private static final String USER_DETAIL_FRAGMENT =
+            "com.instagram.profile.fragment.UserDetailFragment";
 
     private static volatile boolean installed;
-    private static volatile boolean readyToastShown;
     private static volatile View latestTarget;
+    private static volatile long lastHandledDownTime;
 
     private PfpClickDiagnostics() {}
 
@@ -66,486 +51,226 @@ public final class PfpClickDiagnostics {
 
         installHooksOnce();
 
-        if (!isTarget(view)) return;
-
-        latestTarget = view;
-
-        if (!readyToastShown) {
-            readyToastShown = true;
-            try {
-                Toast.makeText(
-                        view.getContext(),
-                        "PFP diagnostics ready",
-                        Toast.LENGTH_SHORT
-                ).show();
-            } catch (Throwable ignored) {}
+        if (TARGET_ID.equals(resourceName(view))) {
+            latestTarget = view;
         }
-
-        view.post(() -> {
-            try {
-                Object listener = clickListener(view);
-                Object delegate = unwrapDelegate(listener);
-
-                ModuleLog.line(TAG + "TARGET"
-                        + " listener=" + className(listener)
-                        + " delegate=" + className(delegate)
-                        + " " + describe(view));
-
-                hookHandler(delegate);
-            } catch (Throwable ignored) {}
-        });
     }
 
     private static synchronized void installHooksOnce() {
         if (installed) return;
 
-        XposedHelpers.findAndHookMethod(View.class, "performClick",
-                new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!(param.thisObject instanceof View)) return;
-
-                        View clicked = (View) param.thisObject;
-                        if (!isTarget(clicked) && !isInsideTarget(clicked)) return;
-
-                        View target = isTarget(clicked) ? clicked : findTargetAncestor(clicked);
-                        if (target == null) target = latestTarget;
-
-                        Object listener = clickListener(target);
-                        Object delegate = unwrapDelegate(listener);
-                        hookHandler(delegate);
-
-                        int testNumber = beginPhoneTest();
-                        ACTIVE_TEST.set(testNumber);
-
-                        phoneLog("TEST_BEGIN #" + testNumber);
-                        phoneLog("CLICK_BEFORE"
-                                + " listener=" + className(listener)
-                                + " delegate=" + className(delegate)
-                                + " clicked=" + describe(clicked)
-                                + " target=" + describeNullable(target));
-                    }
-
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (!(param.thisObject instanceof View)) return;
-
-                        View clicked = (View) param.thisObject;
-                        if (!isTarget(clicked) && !isInsideTarget(clicked)) return;
-
-                        Integer testNumber = ACTIVE_TEST.get();
-                        if (testNumber == null) return;
-
-                        phoneLog("CLICK_AFTER handled="
-                                + String.valueOf(param.getResult()));
-                        phoneLog("TEST_END #" + String.valueOf(testNumber));
-
-                        saveDiagnosticsToDownloads(clicked.getContext(), testNumber);
-                        ACTIVE_TEST.remove();
-                    }
-                });
-
         XposedHelpers.findAndHookMethod(
-                View.class,
-                "performLongClick",
+                Activity.class,
+                "dispatchTouchEvent",
+                MotionEvent.class,
                 new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        if (!(param.thisObject instanceof View)) return;
+                        if (!(param.thisObject instanceof Activity)) return;
+                        if (!(param.args[0] instanceof MotionEvent)) return;
 
-                        View clicked = (View) param.thisObject;
-                        if (!isTarget(clicked) && !isInsideTarget(clicked)) return;
+                        MotionEvent event = (MotionEvent) param.args[0];
+                        if (event.getActionMasked() != MotionEvent.ACTION_UP) return;
 
-                        // This is only a phone-testing fallback. A long press
-                        // on the header PFP always writes a snapshot even when
-                        // Instagram's normal click path short-circuits.
-                        int testNumber = beginPhoneTest();
-                        ACTIVE_TEST.set(testNumber);
-                        phoneLog("LONG_PRESS_SNAPSHOT #" + testNumber
-                                + " clicked=" + describe(clicked));
-
-                        View target = isTarget(clicked)
-                                ? clicked
-                                : findTargetAncestor(clicked);
-                        if (target == null) target = latestTarget;
-
-                        if (target != null) {
-                            dumpInputTree(target);
+                        View target = latestTarget;
+                        if (target == null
+                                || !target.isAttachedToWindow()
+                                || target.getVisibility() != View.VISIBLE) {
+                            return;
                         }
 
-                        phoneLog("TEST_END #" + testNumber);
-                        saveDiagnosticsToDownloads(clicked.getContext(), testNumber);
-                        ACTIVE_TEST.remove();
-                    }
-                });
+                        if (!pointInside(target, event.getRawX(), event.getRawY())) {
+                            return;
+                        }
 
-        installInflaterTrace();
+                        long downTime = event.getDownTime();
+                        if (downTime == lastHandledDownTime) return;
+                        lastHandledDownTime = downTime;
+
+                        Activity activity = (Activity) param.thisObject;
+
+                        // The normal path inflates the viewer within a few ms. Give
+                        // Instagram a short chance to handle the tap first so normal
+                        // profiles never get a duplicate open.
+                        target.postDelayed(() -> {
+                            try {
+                                if (isNativeViewerOpen(activity)) return;
+
+                                boolean invoked = invokeCurrentUserDetailGly(activity);
+                                ModuleLog.line(TAG + "fallback invoked=" + invoked);
+                            } catch (Throwable t) {
+                                ModuleLog.line(TAG + "fallback error="
+                                        + t.getClass().getName());
+                            }
+                        }, 120L);
+                    }
+                }
+        );
 
         installed = true;
     }
 
-    private static void hookHandler(Object delegate) {
-        if (!(delegate instanceof View.OnClickListener)) return;
-
-        Class<?> cls = delegate.getClass();
-        if (!HOOKED_HANDLER_CLASSES.add(cls)) return;
-
-        Method onClick;
+    private static boolean pointInside(View target, float rawX, float rawY) {
         try {
-            onClick = cls.getDeclaredMethod("onClick", View.class);
-            onClick.setAccessible(true);
-        } catch (Throwable t) {
-            HOOKED_HANDLER_CLASSES.remove(cls);
-            return;
-        }
-
-        try {
-            XposedBridge.hookMethod(onClick, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    HANDLER_DEPTH.set(HANDLER_DEPTH.get() + 1);
-
-                    View input = null;
-                    if (param.args.length > 0 && param.args[0] instanceof View) {
-                        input = (View) param.args[0];
-                    }
-
-                    phoneLog("HANDLER_BEGIN class="
-                            + param.thisObject.getClass().getName()
-                            + " input=" + describeNullable(input));
-
-                    if (input != null) {
-                        dumpInputTree(input);
-                    }
-                }
-
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    phoneLog("HANDLER_END class="
-                            + param.thisObject.getClass().getName()
-                            + " threw=" + (param.hasThrowable()
-                            ? param.getThrowable().getClass().getName()
-                            : "none"));
-
-                    int depth = HANDLER_DEPTH.get() - 1;
-                    if (depth <= 0) {
-                        HANDLER_DEPTH.remove();
-                    } else {
-                        HANDLER_DEPTH.set(depth);
-                    }
-                }
-            });
-
-            ModuleLog.line(TAG + "HANDLER_HOOKED class=" + cls.getName());
-        } catch (Throwable t) {
-            HOOKED_HANDLER_CLASSES.remove(cls);
-        }
-    }
-
-    private static void installInflaterTrace() {
-        try {
-            XposedHelpers.findAndHookMethod(
-                    LayoutInflater.class,
-                    "inflate",
-                    int.class,
-                    ViewGroup.class,
-                    boolean.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            if (!handlerActive()) return;
-
-                            int layoutId = (Integer) param.args[0];
-                            String layoutName = resourceName(
-                                    (LayoutInflater) param.thisObject,
-                                    layoutId
-                            );
-
-                            if (!EXPANDED_LAYOUT.equals(layoutName)) return;
-
-                            phoneLog("OPEN_INFLATE"
-                                    + " layout=" + layoutName
-                                    + " parent=" + describeNullable((View) param.args[1])
-                                    + " attach=" + String.valueOf(param.args[2]));
-
-                            dumpOpenStack();
-                        }
-                    });
-        } catch (Throwable ignored) {}
-    }
-
-    private static void dumpOpenStack() {
-        try {
-            StringBuilder out = new StringBuilder("OPEN_STACK");
-
-            StackTraceElement[] stack = new Throwable().getStackTrace();
-            int added = 0;
-
-            for (StackTraceElement frame : stack) {
-                String cls = frame.getClassName();
-
-                if (cls.equals(PfpClickDiagnostics.class.getName())
-                        || cls.startsWith("de.robv.android.xposed.")
-                        || cls.startsWith("java.lang.reflect.")
-                        || cls.startsWith("sun.reflect.")) {
-                    continue;
-                }
-
-                out.append("\n  ")
-                        .append(cls)
-                        .append(".")
-                        .append(frame.getMethodName())
-                        .append(":")
-                        .append(frame.getLineNumber());
-
-                added++;
-                if (added >= 30) break;
-            }
-
-            phoneLog(out.toString());
-        } catch (Throwable ignored) {}
-    }
-
-    private static void dumpInputTree(View root) {
-        try {
-            StringBuilder out = new StringBuilder("INPUT_TREE");
-            appendView(out, root, "root", 0);
-            phoneLog(out.toString());
-        } catch (Throwable ignored) {}
-    }
-
-    private static void appendView(StringBuilder out, View view, String path, int depth) {
-        if (view == null || depth > 4) return;
-
-        out.append("\n  ").append(path)
-                .append(" ").append(describeDetailed(view));
-
-        if (!(view instanceof ViewGroup)) return;
-
-        ViewGroup group = (ViewGroup) view;
-        int count;
-        try {
-            count = group.getChildCount();
-        } catch (Throwable t) {
-            return;
-        }
-
-        int limit = Math.min(count, 24);
-        for (int i = 0; i < limit; i++) {
-            View child;
-            try {
-                child = group.getChildAt(i);
-            } catch (Throwable t) {
-                continue;
-            }
-
-            appendView(out, child, path + "[" + i + "]", depth + 1);
-        }
-
-        if (count > limit) {
-            out.append("\n  ").append(path)
-                    .append(" childrenTruncated=")
-                    .append(count - limit);
-        }
-    }
-
-    private static String describeDetailed(View view) {
-        StringBuilder out = new StringBuilder(describe(view));
-
-        try {
-            Object tag = view.getTag();
-            out.append(" tag=").append(className(tag));
+            Rect rect = new Rect();
+            if (!target.getGlobalVisibleRect(rect)) return false;
+            return rect.contains(Math.round(rawX), Math.round(rawY));
         } catch (Throwable ignored) {
-            out.append(" tag=<error>");
-        }
-
-        try {
-            out.append(" selected=").append(view.isSelected());
-            out.append(" activated=").append(view.isActivated());
-            out.append(" pressed=").append(view.isPressed());
-            out.append(" alpha=").append(view.getAlpha());
-        } catch (Throwable ignored) {}
-
-        try {
-            Drawable background = view.getBackground();
-            out.append(" background=").append(className(background));
-        } catch (Throwable ignored) {}
-
-        if (view instanceof ImageView) {
-            try {
-                Drawable drawable = ((ImageView) view).getDrawable();
-                out.append(" drawable=").append(className(drawable));
-            } catch (Throwable ignored) {}
-        }
-
-        return out.toString();
-    }
-
-    private static int beginPhoneTest() {
-        synchronized (PHONE_BUFFER_LOCK) {
-            if (PHONE_BUFFER.length() > 100_000) {
-                PHONE_BUFFER.setLength(0);
-                PHONE_BUFFER.append("(IE|PFPClickDiag) BUFFER_RESET\n");
-            }
-
-            int number = nextTestNumber++;
-            if (PHONE_BUFFER.length() > 0) {
-                PHONE_BUFFER.append("\n");
-            }
-            return number;
+            return false;
         }
     }
 
-    private static void phoneLog(String message) {
-        String line = message.startsWith(TAG) ? message : TAG + message;
-        ModuleLog.line(line);
+    private static boolean isNativeViewerOpen(Activity activity) {
+        try {
+            int id = activity.getResources().getIdentifier(
+                    EXPANDED_ROOT_ID,
+                    "id",
+                    activity.getPackageName()
+            );
+            if (id == 0) return false;
 
-        if (ACTIVE_TEST.get() == null) return;
-
-        synchronized (PHONE_BUFFER_LOCK) {
-            PHONE_BUFFER.append(line).append("\n");
+            View root = activity.findViewById(id);
+            return root != null
+                    && root.isAttachedToWindow()
+                    && root.getVisibility() == View.VISIBLE;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
-    private static void saveDiagnosticsToDownloads(Context context, Integer testNumber) {
-        if (context == null) return;
+    private static boolean invokeCurrentUserDetailGly(Activity activity) {
+        Object fragment = findCurrentUserDetailFragment(activity);
+        if (fragment == null) {
+            ModuleLog.line(TAG + "UserDetailFragment not found");
+            return false;
+        }
+
+        Method gly = findNoArgMethod(fragment.getClass(), "GLY");
+        if (gly == null) {
+            ModuleLog.line(TAG + "UserDetailFragment.GLY not found");
+            return false;
+        }
 
         try {
-            String text;
-            synchronized (PHONE_BUFFER_LOCK) {
-                text = PHONE_BUFFER.toString();
-            }
-
-            String fileName = "InstaEclipse-PFP-diag-"
-                    + String.valueOf(testNumber)
-                    + ".txt";
-
-            Uri uri;
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ContentValues values = new ContentValues();
-                values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
-                values.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain");
-                values.put(
-                        MediaStore.MediaColumns.RELATIVE_PATH,
-                        Environment.DIRECTORY_DOWNLOADS + "/InstaEclipse"
-                );
-
-                uri = context.getContentResolver().insert(
-                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                        values
-                );
-            } else {
-                uri = null;
-            }
-
-            if (uri == null) {
-                Toast.makeText(
-                        context,
-                        "PFP diagnostics save failed",
-                        Toast.LENGTH_LONG
-                ).show();
-                return;
-            }
-
-            try (OutputStream out = context.getContentResolver().openOutputStream(uri)) {
-                if (out == null) throw new IllegalStateException("openOutputStream returned null");
-                out.write(text.getBytes(StandardCharsets.UTF_8));
-                out.flush();
-            }
-
-            Toast.makeText(
-                    context,
-                    "Saved: Downloads/InstaEclipse/" + fileName,
-                    Toast.LENGTH_LONG
-            ).show();
+            gly.setAccessible(true);
+            gly.invoke(fragment);
+            return true;
         } catch (Throwable t) {
-            try {
-                Toast.makeText(
-                        context,
-                        "PFP diagnostics error: " + t.getClass().getSimpleName(),
-                        Toast.LENGTH_LONG
-                ).show();
-            } catch (Throwable ignored) {}
+            ModuleLog.line(TAG + "GLY invoke failed="
+                    + t.getClass().getName());
+            return false;
         }
     }
 
-    private static boolean handlerActive() {
-        Integer depth = HANDLER_DEPTH.get();
-        return depth != null && depth > 0;
-    }
-
-    private static Object unwrapDelegate(Object listener) {
-        if (listener == null) return null;
-
+    private static Object findCurrentUserDetailFragment(Activity activity) {
         try {
-            Field field = listener.getClass().getDeclaredField("A00");
-            field.setAccessible(true);
-            return field.get(listener);
+            Method getSupportFragmentManager =
+                    findNoArgMethod(activity.getClass(), "getSupportFragmentManager");
+            if (getSupportFragmentManager == null) return null;
+
+            getSupportFragmentManager.setAccessible(true);
+            Object manager = getSupportFragmentManager.invoke(activity);
+            return findUserDetailInManager(manager);
         } catch (Throwable ignored) {
             return null;
         }
     }
 
-    private static String describe(View view) {
-        return "class=" + view.getClass().getName()
-                + " id=" + resourceName(view)
-                + " size=" + view.getWidth() + "x" + view.getHeight()
-                + " visibility=" + view.getVisibility()
-                + " enabled=" + view.isEnabled()
-                + " clickable=" + view.isClickable();
+    private static Object findUserDetailInManager(Object manager) {
+        if (manager == null) return null;
+
+        List<?> fragments;
+        try {
+            Method getFragments = findNoArgMethod(manager.getClass(), "getFragments");
+            if (getFragments == null) return null;
+
+            getFragments.setAccessible(true);
+            Object value = getFragments.invoke(manager);
+            if (!(value instanceof List)) return null;
+
+            fragments = (List<?>) value;
+        } catch (Throwable ignored) {
+            return null;
+        }
+
+        Object fallback = null;
+
+        // Top-most fragments are normally at the end of FragmentManager's list.
+        for (int i = fragments.size() - 1; i >= 0; i--) {
+            Object fragment = fragments.get(i);
+            if (fragment == null) continue;
+
+            if (USER_DETAIL_FRAGMENT.equals(fragment.getClass().getName())) {
+                if (isVisibleFragment(fragment)) {
+                    return fragment;
+                }
+                if (fallback == null) {
+                    fallback = fragment;
+                }
+            }
+
+            Object child = childFragmentManager(fragment);
+            Object nested = findUserDetailInManager(child);
+            if (nested != null) {
+                return nested;
+            }
+        }
+
+        return fallback;
     }
 
-    private static String describeNullable(View view) {
-        return view == null ? "null" : describe(view);
+    private static Object childFragmentManager(Object fragment) {
+        try {
+            Method method = findNoArgMethod(
+                    fragment.getClass(),
+                    "getChildFragmentManager"
+            );
+            if (method == null) return null;
+
+            method.setAccessible(true);
+            return method.invoke(fragment);
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
-    private static boolean isTarget(View view) {
-        return TARGET_ID.equals(resourceName(view));
+    private static boolean isVisibleFragment(Object fragment) {
+        try {
+            Method isVisible = findNoArgMethod(fragment.getClass(), "isVisible");
+            if (isVisible != null) {
+                isVisible.setAccessible(true);
+                Object value = isVisible.invoke(fragment);
+                if (Boolean.TRUE.equals(value)) return true;
+            }
+
+            Method isResumed = findNoArgMethod(fragment.getClass(), "isResumed");
+            if (isResumed != null) {
+                isResumed.setAccessible(true);
+                Object value = isResumed.invoke(fragment);
+                return Boolean.TRUE.equals(value);
+            }
+        } catch (Throwable ignored) {}
+
+        return false;
     }
 
-    private static boolean isInsideTarget(View view) {
-        return findTargetAncestor(view) != null;
-    }
+    private static Method findNoArgMethod(Class<?> start, String name) {
+        Class<?> cls = start;
 
-    private static View findTargetAncestor(View view) {
-        View current = view;
-
-        for (int depth = 0; current != null && depth < 6; depth++) {
-            if (isTarget(current)) return current;
-
-            ViewParent parent;
+        while (cls != null && cls != Object.class) {
             try {
-                parent = current.getParent();
-            } catch (Throwable t) {
+                return cls.getDeclaredMethod(name);
+            } catch (NoSuchMethodException ignored) {
+                cls = cls.getSuperclass();
+            } catch (Throwable ignored) {
                 return null;
             }
-
-            current = parent instanceof View ? (View) parent : null;
         }
 
-        return null;
-    }
-
-    private static Object clickListener(View view) {
         try {
-            Object info = XposedHelpers.getObjectField(view, "mListenerInfo");
-            if (info == null) return null;
-            return XposedHelpers.getObjectField(info, "mOnClickListener");
+            return start.getMethod(name);
         } catch (Throwable ignored) {
             return null;
-        }
-    }
-
-    private static String className(Object value) {
-        return value == null ? "null" : value.getClass().getName();
-    }
-
-    private static String resourceName(LayoutInflater inflater, int id) {
-        try {
-            return inflater.getContext().getResources().getResourceEntryName(id);
-        } catch (Throwable ignored) {
-            return "0x" + Integer.toHexString(id);
         }
     }
 
