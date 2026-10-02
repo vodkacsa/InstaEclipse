@@ -10,6 +10,7 @@ import android.graphics.drawable.Drawable;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.widget.ImageView;
 import android.widget.Toast;
 
@@ -40,6 +41,7 @@ public final class PfpClickDiagnostics {
     private static final String TAG = "(IE|PFPClickDiag) ";
     private static final String TARGET_ID = "row_profile_header_imageview_frame_layout";
     private static final String EXPANDED_LAYOUT = "layout_expanded_profile_picture_view";
+    private static final String CONTENT_ID = "content";
 
     private static final ThreadLocal<Integer> HANDLER_DEPTH =
             ThreadLocal.withInitial(() -> 0);
@@ -55,6 +57,7 @@ public final class PfpClickDiagnostics {
 
     private static volatile boolean installed;
     private static volatile boolean readyToastShown;
+    private static volatile View latestTarget;
 
     private PfpClickDiagnostics() {}
 
@@ -64,6 +67,8 @@ public final class PfpClickDiagnostics {
         installHooksOnce();
 
         if (!isTarget(view)) return;
+
+        latestTarget = view;
 
         if (!readyToastShown) {
             readyToastShown = true;
@@ -101,9 +106,12 @@ public final class PfpClickDiagnostics {
                         if (!(param.thisObject instanceof View)) return;
 
                         View clicked = (View) param.thisObject;
-                        if (!isTarget(clicked)) return;
+                        if (!isTarget(clicked) && !isInsideTarget(clicked)) return;
 
-                        Object listener = clickListener(clicked);
+                        View target = isTarget(clicked) ? clicked : findTargetAncestor(clicked);
+                        if (target == null) target = latestTarget;
+
+                        Object listener = clickListener(target);
                         Object delegate = unwrapDelegate(listener);
                         hookHandler(delegate);
 
@@ -114,7 +122,8 @@ public final class PfpClickDiagnostics {
                         phoneLog("CLICK_BEFORE"
                                 + " listener=" + className(listener)
                                 + " delegate=" + className(delegate)
-                                + " " + describe(clicked));
+                                + " clicked=" + describe(clicked)
+                                + " target=" + describeNullable(target));
                     }
 
                     @Override
@@ -122,14 +131,49 @@ public final class PfpClickDiagnostics {
                         if (!(param.thisObject instanceof View)) return;
 
                         View clicked = (View) param.thisObject;
-                        if (!isTarget(clicked)) return;
+                        if (!isTarget(clicked) && !isInsideTarget(clicked)) return;
 
                         Integer testNumber = ACTIVE_TEST.get();
+                        if (testNumber == null) return;
 
                         phoneLog("CLICK_AFTER handled="
                                 + String.valueOf(param.getResult()));
                         phoneLog("TEST_END #" + String.valueOf(testNumber));
 
+                        saveDiagnosticsToDownloads(clicked.getContext(), testNumber);
+                        ACTIVE_TEST.remove();
+                    }
+                });
+
+        XposedHelpers.findAndHookMethod(
+                View.class,
+                "performLongClick",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (!(param.thisObject instanceof View)) return;
+
+                        View clicked = (View) param.thisObject;
+                        if (!isTarget(clicked) && !isInsideTarget(clicked)) return;
+
+                        // This is only a phone-testing fallback. A long press
+                        // on the header PFP always writes a snapshot even when
+                        // Instagram's normal click path short-circuits.
+                        int testNumber = beginPhoneTest();
+                        ACTIVE_TEST.set(testNumber);
+                        phoneLog("LONG_PRESS_SNAPSHOT #" + testNumber
+                                + " clicked=" + describe(clicked));
+
+                        View target = isTarget(clicked)
+                                ? clicked
+                                : findTargetAncestor(clicked);
+                        if (target == null) target = latestTarget;
+
+                        if (target != null) {
+                            dumpInputTree(target);
+                        }
+
+                        phoneLog("TEST_END #" + testNumber);
                         saveDiagnosticsToDownloads(clicked.getContext(), testNumber);
                         ACTIVE_TEST.remove();
                     }
@@ -458,6 +502,29 @@ public final class PfpClickDiagnostics {
 
     private static boolean isTarget(View view) {
         return TARGET_ID.equals(resourceName(view));
+    }
+
+    private static boolean isInsideTarget(View view) {
+        return findTargetAncestor(view) != null;
+    }
+
+    private static View findTargetAncestor(View view) {
+        View current = view;
+
+        for (int depth = 0; current != null && depth < 6; depth++) {
+            if (isTarget(current)) return current;
+
+            ViewParent parent;
+            try {
+                parent = current.getParent();
+            } catch (Throwable t) {
+                return null;
+            }
+
+            current = parent instanceof View ? (View) parent : null;
+        }
+
+        return null;
     }
 
     private static Object clickListener(View view) {
