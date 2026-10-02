@@ -1,10 +1,14 @@
 package ps.reso.instaeclipse.mods.profile;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.graphics.drawable.Drawable;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
+import android.widget.Toast;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -34,6 +38,12 @@ public final class PfpClickDiagnostics {
 
     private static final ThreadLocal<Integer> HANDLER_DEPTH =
             ThreadLocal.withInitial(() -> 0);
+
+    private static final ThreadLocal<Integer> ACTIVE_TEST = new ThreadLocal<>();
+
+    private static final Object PHONE_BUFFER_LOCK = new Object();
+    private static final StringBuilder PHONE_BUFFER = new StringBuilder();
+    private static int nextTestNumber = 1;
 
     private static final Set<Class<?>> HOOKED_HANDLER_CLASSES =
             Collections.synchronizedSet(new HashSet<>());
@@ -80,7 +90,11 @@ public final class PfpClickDiagnostics {
                         Object delegate = unwrapDelegate(listener);
                         hookHandler(delegate);
 
-                        ModuleLog.line(TAG + "CLICK_BEFORE"
+                        int testNumber = beginPhoneTest();
+                        ACTIVE_TEST.set(testNumber);
+
+                        phoneLog("TEST_BEGIN #" + testNumber);
+                        phoneLog("CLICK_BEFORE"
                                 + " listener=" + className(listener)
                                 + " delegate=" + className(delegate)
                                 + " " + describe(clicked));
@@ -93,8 +107,14 @@ public final class PfpClickDiagnostics {
                         View clicked = (View) param.thisObject;
                         if (!isTarget(clicked)) return;
 
-                        ModuleLog.line(TAG + "CLICK_AFTER handled="
+                        Integer testNumber = ACTIVE_TEST.get();
+
+                        phoneLog("CLICK_AFTER handled="
                                 + String.valueOf(param.getResult()));
+                        phoneLog("TEST_END #" + String.valueOf(testNumber));
+
+                        copyDiagnosticsToClipboard(clicked.getContext(), testNumber);
+                        ACTIVE_TEST.remove();
                     }
                 });
 
@@ -129,7 +149,7 @@ public final class PfpClickDiagnostics {
                         input = (View) param.args[0];
                     }
 
-                    ModuleLog.line(TAG + "HANDLER_BEGIN class="
+                    phoneLog("HANDLER_BEGIN class="
                             + param.thisObject.getClass().getName()
                             + " input=" + describeNullable(input));
 
@@ -140,7 +160,7 @@ public final class PfpClickDiagnostics {
 
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    ModuleLog.line(TAG + "HANDLER_END class="
+                    phoneLog("HANDLER_END class="
                             + param.thisObject.getClass().getName()
                             + " threw=" + (param.hasThrowable()
                             ? param.getThrowable().getClass().getName()
@@ -182,7 +202,7 @@ public final class PfpClickDiagnostics {
 
                             if (!EXPANDED_LAYOUT.equals(layoutName)) return;
 
-                            ModuleLog.line(TAG + "OPEN_INFLATE"
+                            phoneLog("OPEN_INFLATE"
                                     + " layout=" + layoutName
                                     + " parent=" + describeNullable((View) param.args[1])
                                     + " attach=" + String.valueOf(param.args[2]));
@@ -195,7 +215,7 @@ public final class PfpClickDiagnostics {
 
     private static void dumpOpenStack() {
         try {
-            StringBuilder out = new StringBuilder(TAG + "OPEN_STACK");
+            StringBuilder out = new StringBuilder("OPEN_STACK");
 
             StackTraceElement[] stack = new Throwable().getStackTrace();
             int added = 0;
@@ -221,15 +241,15 @@ public final class PfpClickDiagnostics {
                 if (added >= 30) break;
             }
 
-            ModuleLog.line(out.toString());
+            phoneLog(out.toString());
         } catch (Throwable ignored) {}
     }
 
     private static void dumpInputTree(View root) {
         try {
-            StringBuilder out = new StringBuilder(TAG + "INPUT_TREE");
+            StringBuilder out = new StringBuilder("INPUT_TREE");
             appendView(out, root, "root", 0);
-            ModuleLog.line(out.toString());
+            phoneLog(out.toString());
         } catch (Throwable ignored) {}
     }
 
@@ -298,6 +318,59 @@ public final class PfpClickDiagnostics {
         }
 
         return out.toString();
+    }
+
+    private static int beginPhoneTest() {
+        synchronized (PHONE_BUFFER_LOCK) {
+            if (PHONE_BUFFER.length() > 100_000) {
+                PHONE_BUFFER.setLength(0);
+                PHONE_BUFFER.append("(IE|PFPClickDiag) BUFFER_RESET\n");
+            }
+
+            int number = nextTestNumber++;
+            if (PHONE_BUFFER.length() > 0) {
+                PHONE_BUFFER.append("\n");
+            }
+            return number;
+        }
+    }
+
+    private static void phoneLog(String message) {
+        String line = message.startsWith(TAG) ? message : TAG + message;
+        ModuleLog.line(line);
+
+        if (ACTIVE_TEST.get() == null) return;
+
+        synchronized (PHONE_BUFFER_LOCK) {
+            PHONE_BUFFER.append(line).append("\n");
+        }
+    }
+
+    private static void copyDiagnosticsToClipboard(Context context, Integer testNumber) {
+        if (context == null) return;
+
+        try {
+            String text;
+            synchronized (PHONE_BUFFER_LOCK) {
+                text = PHONE_BUFFER.toString();
+            }
+
+            ClipboardManager clipboard =
+                    (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard == null) return;
+
+            clipboard.setPrimaryClip(
+                    ClipData.newPlainText("InstaEclipse PFP diagnostics", text)
+            );
+
+            Toast.makeText(
+                    context,
+                    "PFP diagnostics copied (test "
+                            + String.valueOf(testNumber)
+                            + ")",
+                    Toast.LENGTH_SHORT
+            ).show();
+        } catch (Throwable ignored) {}
     }
 
     private static boolean handlerActive() {
