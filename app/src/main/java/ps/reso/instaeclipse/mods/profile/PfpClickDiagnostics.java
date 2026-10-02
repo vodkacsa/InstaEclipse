@@ -1,8 +1,11 @@
 package ps.reso.instaeclipse.mods.profile;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
+import android.content.ContentValues;
 import android.content.Context;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.graphics.drawable.Drawable;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -10,8 +13,10 @@ import android.view.ViewGroup;
 import android.widget.ImageView;
 import android.widget.Toast;
 
+import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
@@ -49,6 +54,7 @@ public final class PfpClickDiagnostics {
             Collections.synchronizedSet(new HashSet<>());
 
     private static volatile boolean installed;
+    private static volatile boolean readyToastShown;
 
     private PfpClickDiagnostics() {}
 
@@ -58,6 +64,17 @@ public final class PfpClickDiagnostics {
         installHooksOnce();
 
         if (!isTarget(view)) return;
+
+        if (!readyToastShown) {
+            readyToastShown = true;
+            try {
+                Toast.makeText(
+                        view.getContext(),
+                        "PFP diagnostics ready",
+                        Toast.LENGTH_SHORT
+                ).show();
+            } catch (Throwable ignored) {}
+        }
 
         view.post(() -> {
             try {
@@ -113,7 +130,7 @@ public final class PfpClickDiagnostics {
                                 + String.valueOf(param.getResult()));
                         phoneLog("TEST_END #" + String.valueOf(testNumber));
 
-                        copyDiagnosticsToClipboard(clicked.getContext(), testNumber);
+                        saveDiagnosticsToDownloads(clicked.getContext(), testNumber);
                         ACTIVE_TEST.remove();
                     }
                 });
@@ -346,7 +363,7 @@ public final class PfpClickDiagnostics {
         }
     }
 
-    private static void copyDiagnosticsToClipboard(Context context, Integer testNumber) {
+    private static void saveDiagnosticsToDownloads(Context context, Integer testNumber) {
         if (context == null) return;
 
         try {
@@ -355,22 +372,58 @@ public final class PfpClickDiagnostics {
                 text = PHONE_BUFFER.toString();
             }
 
-            ClipboardManager clipboard =
-                    (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (clipboard == null) return;
+            String fileName = "InstaEclipse-PFP-diag-"
+                    + String.valueOf(testNumber)
+                    + ".txt";
 
-            clipboard.setPrimaryClip(
-                    ClipData.newPlainText("InstaEclipse PFP diagnostics", text)
-            );
+            Uri uri;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+                values.put(
+                        MediaStore.MediaColumns.RELATIVE_PATH,
+                        Environment.DIRECTORY_DOWNLOADS + "/InstaEclipse"
+                );
+
+                uri = context.getContentResolver().insert(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        values
+                );
+            } else {
+                uri = null;
+            }
+
+            if (uri == null) {
+                Toast.makeText(
+                        context,
+                        "PFP diagnostics save failed",
+                        Toast.LENGTH_LONG
+                ).show();
+                return;
+            }
+
+            try (OutputStream out = context.getContentResolver().openOutputStream(uri)) {
+                if (out == null) throw new IllegalStateException("openOutputStream returned null");
+                out.write(text.getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            }
 
             Toast.makeText(
                     context,
-                    "PFP diagnostics copied (test "
-                            + String.valueOf(testNumber)
-                            + ")",
-                    Toast.LENGTH_SHORT
+                    "Saved: Downloads/InstaEclipse/" + fileName,
+                    Toast.LENGTH_LONG
             ).show();
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            try {
+                Toast.makeText(
+                        context,
+                        "PFP diagnostics error: " + t.getClass().getSimpleName(),
+                        Toast.LENGTH_LONG
+                ).show();
+            } catch (Throwable ignored) {}
+        }
     }
 
     private static boolean handlerActive() {
