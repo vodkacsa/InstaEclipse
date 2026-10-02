@@ -1,15 +1,15 @@
 package ps.reso.instaeclipse.mods.profile;
 
-import android.app.Activity;
-import android.content.Context;
-import android.content.ContextWrapper;
-import android.graphics.Rect;
-import android.os.SystemClock;
-import android.view.MotionEvent;
+import android.view.LayoutInflater;
 import android.view.View;
+import android.view.ViewGroup;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.List;
+import java.lang.reflect.Modifier;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -17,213 +17,257 @@ import de.robv.android.xposed.XposedHelpers;
 import ps.reso.instaeclipse.utils.log.ModuleLog;
 
 /**
- * Native profile-picture click fallback.
+ * Native profile-picture click repair.
  *
- * Some profiles install the same native X.F7m click handler as normal profiles,
- * but that handler returns immediately before reaching UserDetailFragment.GLY().
- * A known-good native open path is:
+ * Normal profiles and broken profiles both use the same X.0ur -> X.F7m
+ * listener. On normal profiles X.F7m reaches UserDetailFragment.GLY() and
+ * inflates layout_expanded_profile_picture_view. On broken profiles X.F7m
+ * simply returns before that point.
  *
- * X.F7m.onClick -> ... -> UserDetailFragment.GLY -> X.DUO.GLY ->
- * X.DUO.A00 -> layout_expanded_profile_picture_view
- *
- * Instead of trying to patch the profile's clickability state, this watches the
- * Activity-level touch stream. If a tap lands on the header PFP and Instagram
- * did not open the native expanded viewer itself, it invokes the current
- * UserDetailFragment.GLY() directly. This keeps Instagram's own viewer,
- * animations, image loading and PfpRendererBypass intact.
+ * This hook leaves normal clicks completely alone. It only falls back when the
+ * exact native X.F7m handler has finished and the expanded layout was NOT
+ * inflated during that click. The fallback resolves the UserDetailFragment
+ * owning the clicked view and invokes its existing GLY() method, which is the
+ * native entry point observed in the working call stack.
  */
 public final class PfpClickDiagnostics {
 
     private static final String TAG = "(IE|PFPClickPatch) ";
     private static final String TARGET_ID = "row_profile_header_imageview_frame_layout";
-    private static final String EXPANDED_ROOT_ID = "touch_interceptor_expanded_profile_pic";
+    private static final String EXPANDED_LAYOUT = "layout_expanded_profile_picture_view";
     private static final String USER_DETAIL_FRAGMENT =
             "com.instagram.profile.fragment.UserDetailFragment";
 
+    private static final ThreadLocal<Integer> HANDLER_DEPTH =
+            ThreadLocal.withInitial(() -> 0);
+    private static final ThreadLocal<Boolean> NATIVE_OPENED =
+            ThreadLocal.withInitial(() -> false);
+
+    private static final Set<Class<?>> HOOKED_HANDLER_CLASSES =
+            Collections.synchronizedSet(new HashSet<>());
+
     private static volatile boolean installed;
-    private static volatile View latestTarget;
-    private static volatile long lastHandledDownTime;
 
     private PfpClickDiagnostics() {}
 
     public static void observeAttached(View view) {
         if (view == null) return;
 
-        installHooksOnce();
+        installInflaterTrace();
 
-        if (TARGET_ID.equals(resourceName(view))) {
-            latestTarget = view;
-        }
+        if (!isTarget(view)) return;
+
+        view.post(() -> {
+            try {
+                Object wrapper = clickListener(view);
+                Object delegate = unwrapDelegate(wrapper);
+                hookNativeHandler(delegate);
+            } catch (Throwable ignored) {}
+        });
     }
 
-    private static synchronized void installHooksOnce() {
+    private static synchronized void installInflaterTrace() {
         if (installed) return;
 
-        XposedHelpers.findAndHookMethod(
-                Activity.class,
-                "dispatchTouchEvent",
-                MotionEvent.class,
-                new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (!(param.thisObject instanceof Activity)) return;
-                        if (!(param.args[0] instanceof MotionEvent)) return;
+        try {
+            XposedHelpers.findAndHookMethod(
+                    LayoutInflater.class,
+                    "inflate",
+                    int.class,
+                    ViewGroup.class,
+                    boolean.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (HANDLER_DEPTH.get() <= 0) return;
 
-                        MotionEvent event = (MotionEvent) param.args[0];
-                        if (event.getActionMasked() != MotionEvent.ACTION_UP) return;
+                            int layoutId = (Integer) param.args[0];
+                            String layoutName = resourceName(
+                                    (LayoutInflater) param.thisObject,
+                                    layoutId
+                            );
 
-                        View target = latestTarget;
-                        if (target == null
-                                || !target.isAttachedToWindow()
-                                || target.getVisibility() != View.VISIBLE) {
-                            return;
-                        }
-
-                        if (!pointInside(target, event.getRawX(), event.getRawY())) {
-                            return;
-                        }
-
-                        long downTime = event.getDownTime();
-                        if (downTime == lastHandledDownTime) return;
-                        lastHandledDownTime = downTime;
-
-                        Activity activity = (Activity) param.thisObject;
-
-                        // The normal path inflates the viewer within a few ms. Give
-                        // Instagram a short chance to handle the tap first so normal
-                        // profiles never get a duplicate open.
-                        target.postDelayed(() -> {
-                            try {
-                                if (isNativeViewerOpen(activity)) return;
-
-                                boolean invoked = invokeCurrentUserDetailGly(activity);
-                                ModuleLog.line(TAG + "fallback invoked=" + invoked);
-                            } catch (Throwable t) {
-                                ModuleLog.line(TAG + "fallback error="
-                                        + t.getClass().getName());
+                            if (EXPANDED_LAYOUT.equals(layoutName)) {
+                                NATIVE_OPENED.set(true);
                             }
-                        }, 120L);
+                        }
                     }
-                }
-        );
+            );
+        } catch (Throwable t) {
+            ModuleLog.line(TAG + "inflate hook failed=" + t.getClass().getName());
+        }
 
         installed = true;
     }
 
-    private static boolean pointInside(View target, float rawX, float rawY) {
+    private static void hookNativeHandler(Object delegate) {
+        if (!(delegate instanceof View.OnClickListener)) return;
+
+        Class<?> cls = delegate.getClass();
+        if (!HOOKED_HANDLER_CLASSES.add(cls)) return;
+
+        Method onClick;
         try {
-            Rect rect = new Rect();
-            if (!target.getGlobalVisibleRect(rect)) return false;
-            return rect.contains(Math.round(rawX), Math.round(rawY));
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private static boolean isNativeViewerOpen(Activity activity) {
-        try {
-            int id = activity.getResources().getIdentifier(
-                    EXPANDED_ROOT_ID,
-                    "id",
-                    activity.getPackageName()
-            );
-            if (id == 0) return false;
-
-            View root = activity.findViewById(id);
-            return root != null
-                    && root.isAttachedToWindow()
-                    && root.getVisibility() == View.VISIBLE;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private static boolean invokeCurrentUserDetailGly(Activity activity) {
-        Object fragment = findCurrentUserDetailFragment(activity);
-        if (fragment == null) {
-            ModuleLog.line(TAG + "UserDetailFragment not found");
-            return false;
-        }
-
-        Method gly = findNoArgMethod(fragment.getClass(), "GLY");
-        if (gly == null) {
-            ModuleLog.line(TAG + "UserDetailFragment.GLY not found");
-            return false;
-        }
-
-        try {
-            gly.setAccessible(true);
-            gly.invoke(fragment);
-            return true;
+            onClick = cls.getDeclaredMethod("onClick", View.class);
+            onClick.setAccessible(true);
         } catch (Throwable t) {
-            ModuleLog.line(TAG + "GLY invoke failed="
-                    + t.getClass().getName());
-            return false;
+            HOOKED_HANDLER_CLASSES.remove(cls);
+            return;
+        }
+
+        try {
+            XposedBridge.hookMethod(onClick, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    int depth = HANDLER_DEPTH.get();
+                    HANDLER_DEPTH.set(depth + 1);
+
+                    if (depth == 0) {
+                        NATIVE_OPENED.set(false);
+                    }
+                }
+
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    int depth = HANDLER_DEPTH.get();
+
+                    try {
+                        if (depth == 1
+                                && !param.hasThrowable()
+                                && !Boolean.TRUE.equals(NATIVE_OPENED.get())
+                                && param.args.length > 0
+                                && param.args[0] instanceof View) {
+
+                            View clicked = (View) param.args[0];
+
+                            if (isTarget(clicked)) {
+                                Object fragment = findOwningUserDetailFragment(clicked);
+
+                                if (fragment != null) {
+                                    Method gly = findNoArgMethod(fragment.getClass(), "GLY");
+
+                                    if (gly != null) {
+                                        gly.setAccessible(true);
+                                        gly.invoke(fragment);
+
+                                        ModuleLog.line(TAG
+                                                + "recovered broken native PFP click");
+                                    } else {
+                                        ModuleLog.line(TAG
+                                                + "fallback GLY not found");
+                                    }
+                                } else {
+                                    ModuleLog.line(TAG
+                                            + "fallback UserDetailFragment not found");
+                                }
+                            }
+                        }
+                    } catch (Throwable t) {
+                        ModuleLog.line(TAG + "fallback failed="
+                                + t.getClass().getName());
+                    } finally {
+                        int newDepth = depth - 1;
+                        if (newDepth <= 0) {
+                            HANDLER_DEPTH.remove();
+                            NATIVE_OPENED.remove();
+                        } else {
+                            HANDLER_DEPTH.set(newDepth);
+                        }
+                    }
+                }
+            });
+
+            ModuleLog.line(TAG + "hooked native handler=" + cls.getName());
+        } catch (Throwable t) {
+            HOOKED_HANDLER_CLASSES.remove(cls);
         }
     }
 
-    private static Object findCurrentUserDetailFragment(Activity activity) {
-        try {
-            Method getSupportFragmentManager =
-                    findNoArgMethod(activity.getClass(), "getSupportFragmentManager");
-            if (getSupportFragmentManager == null) return null;
+    private static Object findOwningUserDetailFragment(View view) {
+        Object fragment = findFragmentForView(view);
 
-            getSupportFragmentManager.setAccessible(true);
-            Object manager = getSupportFragmentManager.invoke(activity);
-            return findUserDetailInManager(manager);
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private static Object findUserDetailInManager(Object manager) {
-        if (manager == null) return null;
-
-        List<?> fragments;
-        try {
-            Method getFragments = findNoArgMethod(manager.getClass(), "getFragments");
-            if (getFragments == null) return null;
-
-            getFragments.setAccessible(true);
-            Object value = getFragments.invoke(manager);
-            if (!(value instanceof List)) return null;
-
-            fragments = (List<?>) value;
-        } catch (Throwable ignored) {
-            return null;
-        }
-
-        Object fallback = null;
-
-        // Top-most fragments are normally at the end of FragmentManager's list.
-        for (int i = fragments.size() - 1; i >= 0; i--) {
-            Object fragment = fragments.get(i);
-            if (fragment == null) continue;
-
+        while (fragment != null) {
             if (USER_DETAIL_FRAGMENT.equals(fragment.getClass().getName())) {
-                if (isVisibleFragment(fragment)) {
-                    return fragment;
-                }
-                if (fallback == null) {
-                    fallback = fragment;
-                }
+                return fragment;
             }
 
-            Object child = childFragmentManager(fragment);
-            Object nested = findUserDetailInManager(child);
-            if (nested != null) {
-                return nested;
-            }
+            fragment = parentFragment(fragment);
         }
 
-        return fallback;
+        return null;
     }
 
-    private static Object childFragmentManager(Object fragment) {
+    private static Object findFragmentForView(View view) {
+        if (view == null) return null;
+
+        ClassLoader loader = view.getClass().getClassLoader();
+        if (loader == null) {
+            loader = view.getContext().getClassLoader();
+        }
+
+        try {
+            Class<?> manager = Class.forName(
+                    "androidx.fragment.app.FragmentManager",
+                    false,
+                    loader
+            );
+
+            for (Method method : manager.getDeclaredMethods()) {
+                if (!Modifier.isStatic(method.getModifiers())) continue;
+                if (!"findFragment".equals(method.getName())) continue;
+
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 1 || !View.class.isAssignableFrom(params[0])) {
+                    continue;
+                }
+
+                method.setAccessible(true);
+                return method.invoke(null, view);
+            }
+        } catch (Throwable ignored) {}
+
+        // Some Fragment versions expose the lookup under a different internal
+        // method name. As a fallback, scan static one-View methods whose return
+        // type is a Fragment.
+        try {
+            Class<?> manager = Class.forName(
+                    "androidx.fragment.app.FragmentManager",
+                    false,
+                    loader
+            );
+            Class<?> fragmentClass = Class.forName(
+                    "androidx.fragment.app.Fragment",
+                    false,
+                    loader
+            );
+
+            for (Method method : manager.getDeclaredMethods()) {
+                if (!Modifier.isStatic(method.getModifiers())) continue;
+                if (!fragmentClass.isAssignableFrom(method.getReturnType())) continue;
+
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 1 || !View.class.isAssignableFrom(params[0])) {
+                    continue;
+                }
+
+                try {
+                    method.setAccessible(true);
+                    Object result = method.invoke(null, view);
+                    if (result != null) return result;
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {}
+
+        return null;
+    }
+
+    private static Object parentFragment(Object fragment) {
+        if (fragment == null) return null;
+
         try {
             Method method = findNoArgMethod(
                     fragment.getClass(),
-                    "getChildFragmentManager"
+                    "getParentFragment"
             );
             if (method == null) return null;
 
@@ -232,26 +276,6 @@ public final class PfpClickDiagnostics {
         } catch (Throwable ignored) {
             return null;
         }
-    }
-
-    private static boolean isVisibleFragment(Object fragment) {
-        try {
-            Method isVisible = findNoArgMethod(fragment.getClass(), "isVisible");
-            if (isVisible != null) {
-                isVisible.setAccessible(true);
-                Object value = isVisible.invoke(fragment);
-                if (Boolean.TRUE.equals(value)) return true;
-            }
-
-            Method isResumed = findNoArgMethod(fragment.getClass(), "isResumed");
-            if (isResumed != null) {
-                isResumed.setAccessible(true);
-                Object value = isResumed.invoke(fragment);
-                return Boolean.TRUE.equals(value);
-            }
-        } catch (Throwable ignored) {}
-
-        return false;
     }
 
     private static Method findNoArgMethod(Class<?> start, String name) {
@@ -271,6 +295,40 @@ public final class PfpClickDiagnostics {
             return start.getMethod(name);
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    private static Object unwrapDelegate(Object listener) {
+        if (listener == null) return null;
+
+        try {
+            Field field = listener.getClass().getDeclaredField("A00");
+            field.setAccessible(true);
+            return field.get(listener);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object clickListener(View view) {
+        try {
+            Object info = XposedHelpers.getObjectField(view, "mListenerInfo");
+            if (info == null) return null;
+            return XposedHelpers.getObjectField(info, "mOnClickListener");
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isTarget(View view) {
+        return TARGET_ID.equals(resourceName(view));
+    }
+
+    private static String resourceName(LayoutInflater inflater, int id) {
+        try {
+            return inflater.getContext().getResources().getResourceEntryName(id);
+        } catch (Throwable ignored) {
+            return "0x" + Integer.toHexString(id);
         }
     }
 
