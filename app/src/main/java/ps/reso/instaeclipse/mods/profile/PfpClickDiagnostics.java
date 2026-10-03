@@ -6,6 +6,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.view.LayoutInflater;
@@ -532,6 +533,23 @@ public final class PfpClickDiagnostics {
                     protected void beforeHookedMethod(MethodHookParam param) {
                         if (ACTIVE_CAPTURE.get() == null) return;
 
+                        if (className.equals("X.EeU")
+                                && methodName.equals("E0p")
+                                && param.args.length >= 3
+                                && param.args[1] == null
+                                && param.args[2] instanceof View
+                                && "com.instagram.avatars.coinflip.ProfileCoinFlipView".equals(
+                                param.args[2].getClass().getName())) {
+                            RectF bounds = globalBounds((View) param.args[2]);
+                            if (bounds != null) {
+                                param.args[1] = bounds;
+                                captureLog("COINFLIP_RECT_FIX #"
+                                        + ACTIVE_CAPTURE.get()
+                                        + " rect=" + bounds.toShortString()
+                                        + " view=" + describe((View) param.args[2]));
+                            }
+                        }
+
                         captureLog("TRACE_ENTER #"
                                 + ACTIVE_CAPTURE.get()
                                 + " " + key
@@ -781,6 +799,18 @@ public final class PfpClickDiagnostics {
         }
 
         return current instanceof Activity ? (Activity) current : null;
+    }
+
+    private static RectF globalBounds(View view) {
+        if (view == null || !view.isAttachedToWindow()) return null;
+
+        try {
+            Rect rect = new Rect();
+            if (!view.getGlobalVisibleRect(rect) || rect.isEmpty()) return null;
+            return new RectF(rect);
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static boolean pointInside(View view, float x, float y) {
