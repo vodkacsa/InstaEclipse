@@ -10,6 +10,7 @@ import java.lang.reflect.Modifier;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -17,33 +18,25 @@ import de.robv.android.xposed.XposedHelpers;
 import ps.reso.instaeclipse.utils.log.ModuleLog;
 
 /**
- * Native profile-picture click repair.
+ * Temporary PFP click diagnostics.
  *
- * Normal profiles and broken profiles both use the same X.0ur -> X.F7m
- * listener. On normal profiles X.F7m reaches UserDetailFragment.GLY() and
- * inflates layout_expanded_profile_picture_view. On broken profiles X.F7m
- * simply returns before that point.
- *
- * This hook leaves normal clicks completely alone. It only falls back when the
- * exact native X.F7m handler has finished and the expanded layout was NOT
- * inflated during that click. The fallback resolves the UserDetailFragment
- * owning the clicked view and invokes its existing GLY() method, which is the
- * native entry point observed in the working call stack.
+ * Pure logging only. This class must not change Instagram's click result,
+ * fragment state, view hierarchy or native expanded-PFP flow.
  */
 public final class PfpClickDiagnostics {
 
-    private static final String TAG = "(IE|PFPClickPatch) ";
+    private static final String TAG = "(IE|PFPClickDiag) ";
     private static final String TARGET_ID = "row_profile_header_imageview_frame_layout";
     private static final String EXPANDED_LAYOUT = "layout_expanded_profile_picture_view";
-    private static final String USER_DETAIL_FRAGMENT =
-            "com.instagram.profile.fragment.UserDetailFragment";
 
-    private static final ThreadLocal<Integer> HANDLER_DEPTH =
-            ThreadLocal.withInitial(() -> 0);
-    private static final ThreadLocal<Boolean> NATIVE_OPENED =
+    private static final AtomicInteger NEXT_CLICK = new AtomicInteger(1);
+    private static final ThreadLocal<Integer> ACTIVE_CLICK = new ThreadLocal<>();
+    private static final ThreadLocal<Boolean> OPENED =
             ThreadLocal.withInitial(() -> false);
 
     private static final Set<Class<?>> HOOKED_HANDLER_CLASSES =
+            Collections.synchronizedSet(new HashSet<>());
+    private static final Set<String> HOOKED_TRACE_METHODS =
             Collections.synchronizedSet(new HashSet<>());
 
     private static volatile boolean installed;
@@ -53,7 +46,8 @@ public final class PfpClickDiagnostics {
     public static void observeAttached(View view) {
         if (view == null) return;
 
-        installInflaterTrace();
+        installBaseHooks();
+        installKnownPathHooks(view.getClass().getClassLoader());
 
         if (!isTarget(view)) return;
 
@@ -61,13 +55,75 @@ public final class PfpClickDiagnostics {
             try {
                 Object wrapper = clickListener(view);
                 Object delegate = unwrapDelegate(wrapper);
+
+                ModuleLog.line(TAG + "TARGET"
+                        + " wrapper=" + className(wrapper)
+                        + " delegate=" + className(delegate)
+                        + " " + describe(view));
+
                 hookNativeHandler(delegate);
-            } catch (Throwable ignored) {}
+            } catch (Throwable t) {
+                ModuleLog.line(TAG + "TARGET_ERROR " + error(t));
+            }
         });
     }
 
-    private static synchronized void installInflaterTrace() {
+    private static synchronized void installBaseHooks() {
         if (installed) return;
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    View.class,
+                    "performClick",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!(param.thisObject instanceof View)) return;
+
+                            View clicked = (View) param.thisObject;
+                            if (!isTarget(clicked)) return;
+
+                            int click = NEXT_CLICK.getAndIncrement();
+                            ACTIVE_CLICK.set(click);
+                            OPENED.set(false);
+
+                            Object wrapper = clickListener(clicked);
+                            Object delegate = unwrapDelegate(wrapper);
+                            hookNativeHandler(delegate);
+
+                            ModuleLog.line(TAG + "CLICK_BEGIN #" + click
+                                    + " wrapper=" + className(wrapper)
+                                    + " delegate=" + className(delegate)
+                                    + " " + describe(clicked));
+
+                            dumpDirectFields("F7M_FIELDS", delegate);
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (!(param.thisObject instanceof View)) return;
+
+                            View clicked = (View) param.thisObject;
+                            if (!isTarget(clicked)) return;
+
+                            Integer click = ACTIVE_CLICK.get();
+
+                            ModuleLog.line(TAG + "CLICK_END #"
+                                    + String.valueOf(click)
+                                    + " handled=" + String.valueOf(param.getResult())
+                                    + " opened=" + String.valueOf(OPENED.get())
+                                    + " threw=" + (param.hasThrowable()
+                                    ? error(param.getThrowable())
+                                    : "none"));
+
+                            ACTIVE_CLICK.remove();
+                            OPENED.remove();
+                        }
+                    }
+            );
+        } catch (Throwable t) {
+            ModuleLog.line(TAG + "performClick hook failed=" + error(t));
+        }
 
         try {
             XposedHelpers.findAndHookMethod(
@@ -79,7 +135,7 @@ public final class PfpClickDiagnostics {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
-                            if (HANDLER_DEPTH.get() <= 0) return;
+                            if (ACTIVE_CLICK.get() == null) return;
 
                             int layoutId = (Integer) param.args[0];
                             String layoutName = resourceName(
@@ -87,14 +143,22 @@ public final class PfpClickDiagnostics {
                                     layoutId
                             );
 
-                            if (EXPANDED_LAYOUT.equals(layoutName)) {
-                                NATIVE_OPENED.set(true);
-                            }
+                            if (!EXPANDED_LAYOUT.equals(layoutName)) return;
+
+                            OPENED.set(true);
+
+                            ModuleLog.line(TAG + "OPEN_INFLATE #"
+                                    + ACTIVE_CLICK.get()
+                                    + " layout=" + layoutName
+                                    + " parent=" + describeNullable((View) param.args[1])
+                                    + " attach=" + String.valueOf(param.args[2]));
+
+                            dumpStack("OPEN_STACK");
                         }
                     }
             );
         } catch (Throwable t) {
-            ModuleLog.line(TAG + "inflate hook failed=" + t.getClass().getName());
+            ModuleLog.line(TAG + "inflate hook failed=" + error(t));
         }
 
         installed = true;
@@ -106,196 +170,264 @@ public final class PfpClickDiagnostics {
         Class<?> cls = delegate.getClass();
         if (!HOOKED_HANDLER_CLASSES.add(cls)) return;
 
-        Method onClick;
         try {
-            onClick = cls.getDeclaredMethod("onClick", View.class);
+            Method onClick = cls.getDeclaredMethod("onClick", View.class);
             onClick.setAccessible(true);
-        } catch (Throwable t) {
-            HOOKED_HANDLER_CLASSES.remove(cls);
-            return;
-        }
 
-        try {
             XposedBridge.hookMethod(onClick, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    int depth = HANDLER_DEPTH.get();
-                    HANDLER_DEPTH.set(depth + 1);
+                    if (ACTIVE_CLICK.get() == null) return;
 
-                    if (depth == 0) {
-                        NATIVE_OPENED.set(false);
-                    }
+                    View input = param.args.length > 0 && param.args[0] instanceof View
+                            ? (View) param.args[0]
+                            : null;
+
+                    ModuleLog.line(TAG + "HANDLER_BEGIN #"
+                            + ACTIVE_CLICK.get()
+                            + " class=" + param.thisObject.getClass().getName()
+                            + " input=" + describeNullable(input));
                 }
 
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    int depth = HANDLER_DEPTH.get();
+                    if (ACTIVE_CLICK.get() == null) return;
 
-                    try {
-                        if (depth == 1
-                                && !param.hasThrowable()
-                                && !Boolean.TRUE.equals(NATIVE_OPENED.get())
-                                && param.args.length > 0
-                                && param.args[0] instanceof View) {
-
-                            View clicked = (View) param.args[0];
-
-                            if (isTarget(clicked)) {
-                                Object fragment = findOwningUserDetailFragment(clicked);
-
-                                if (fragment != null) {
-                                    Method gly = findNoArgMethod(fragment.getClass(), "GLY");
-
-                                    if (gly != null) {
-                                        gly.setAccessible(true);
-                                        gly.invoke(fragment);
-
-                                        ModuleLog.line(TAG
-                                                + "recovered broken native PFP click");
-                                    } else {
-                                        ModuleLog.line(TAG
-                                                + "fallback GLY not found");
-                                    }
-                                } else {
-                                    ModuleLog.line(TAG
-                                            + "fallback UserDetailFragment not found");
-                                }
-                            }
-                        }
-                    } catch (Throwable t) {
-                        ModuleLog.line(TAG + "fallback failed="
-                                + t.getClass().getName());
-                    } finally {
-                        int newDepth = depth - 1;
-                        if (newDepth <= 0) {
-                            HANDLER_DEPTH.remove();
-                            NATIVE_OPENED.remove();
-                        } else {
-                            HANDLER_DEPTH.set(newDepth);
-                        }
-                    }
+                    ModuleLog.line(TAG + "HANDLER_END #"
+                            + ACTIVE_CLICK.get()
+                            + " class=" + param.thisObject.getClass().getName()
+                            + " opened=" + OPENED.get()
+                            + " threw=" + (param.hasThrowable()
+                            ? error(param.getThrowable())
+                            : "none"));
                 }
             });
 
-            ModuleLog.line(TAG + "hooked native handler=" + cls.getName());
+            ModuleLog.line(TAG + "HANDLER_HOOKED class=" + cls.getName());
         } catch (Throwable t) {
             HOOKED_HANDLER_CLASSES.remove(cls);
+            ModuleLog.line(TAG + "HANDLER_HOOK_FAILED class="
+                    + cls.getName() + " error=" + error(t));
         }
     }
 
-    private static Object findOwningUserDetailFragment(View view) {
-        Object fragment = findFragmentForView(view);
+    private static void installKnownPathHooks(ClassLoader loader) {
+        if (loader == null) return;
 
-        while (fragment != null) {
-            if (USER_DETAIL_FRAGMENT.equals(fragment.getClass().getName())) {
-                return fragment;
-            }
-
-            fragment = parentFragment(fragment);
-        }
-
-        return null;
+        hookNamedMethods(loader, "X.EeU", "E0p");
+        hookNamedMethods(loader, "X.EdZ", "E0p");
+        hookNamedMethods(loader, "X.EdT", "E0p");
+        hookNamedMethods(loader, "X.DiK", "E0p");
+        hookNamedMethods(loader, "X.C7D", "invoke");
+        hookNamedMethods(
+                loader,
+                "com.instagram.profile.fragment.UserDetailFragment",
+                "GLY"
+        );
+        hookNamedMethods(loader, "X.DUO", "GLY");
+        hookNamedMethods(loader, "X.DUO", "A00");
     }
 
-    private static Object findFragmentForView(View view) {
-        if (view == null) return null;
-
-        ClassLoader loader = view.getClass().getClassLoader();
-        if (loader == null) {
-            loader = view.getContext().getClassLoader();
-        }
-
+    private static void hookNamedMethods(
+            ClassLoader loader,
+            String className,
+            String methodName
+    ) {
+        Class<?> cls;
         try {
-            Class<?> manager = Class.forName(
-                    "androidx.fragment.app.FragmentManager",
-                    false,
-                    loader
-            );
-
-            for (Method method : manager.getDeclaredMethods()) {
-                if (!Modifier.isStatic(method.getModifiers())) continue;
-                if (!"findFragment".equals(method.getName())) continue;
-
-                Class<?>[] params = method.getParameterTypes();
-                if (params.length != 1 || !View.class.isAssignableFrom(params[0])) {
-                    continue;
-                }
-
-                method.setAccessible(true);
-                return method.invoke(null, view);
-            }
-        } catch (Throwable ignored) {}
-
-        // Some Fragment versions expose the lookup under a different internal
-        // method name. As a fallback, scan static one-View methods whose return
-        // type is a Fragment.
-        try {
-            Class<?> manager = Class.forName(
-                    "androidx.fragment.app.FragmentManager",
-                    false,
-                    loader
-            );
-            Class<?> fragmentClass = Class.forName(
-                    "androidx.fragment.app.Fragment",
-                    false,
-                    loader
-            );
-
-            for (Method method : manager.getDeclaredMethods()) {
-                if (!Modifier.isStatic(method.getModifiers())) continue;
-                if (!fragmentClass.isAssignableFrom(method.getReturnType())) continue;
-
-                Class<?>[] params = method.getParameterTypes();
-                if (params.length != 1 || !View.class.isAssignableFrom(params[0])) {
-                    continue;
-                }
-
-                try {
-                    method.setAccessible(true);
-                    Object result = method.invoke(null, view);
-                    if (result != null) return result;
-                } catch (Throwable ignored) {}
-            }
-        } catch (Throwable ignored) {}
-
-        return null;
-    }
-
-    private static Object parentFragment(Object fragment) {
-        if (fragment == null) return null;
-
-        try {
-            Method method = findNoArgMethod(
-                    fragment.getClass(),
-                    "getParentFragment"
-            );
-            if (method == null) return null;
-
-            method.setAccessible(true);
-            return method.invoke(fragment);
+            cls = Class.forName(className, false, loader);
         } catch (Throwable ignored) {
-            return null;
+            return;
+        }
+
+        Method[] methods;
+        try {
+            methods = cls.getDeclaredMethods();
+        } catch (Throwable ignored) {
+            return;
+        }
+
+        for (Method method : methods) {
+            if (!methodName.equals(method.getName())) continue;
+
+            String key = className + "#" + signature(method);
+            if (!HOOKED_TRACE_METHODS.add(key)) continue;
+
+            try {
+                method.setAccessible(true);
+
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (ACTIVE_CLICK.get() == null) return;
+
+                        ModuleLog.line(TAG + "TRACE_ENTER #"
+                                + ACTIVE_CLICK.get()
+                                + " " + key
+                                + " this=" + className(param.thisObject)
+                                + " args=" + safeArgs(param.args));
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (ACTIVE_CLICK.get() == null) return;
+
+                        ModuleLog.line(TAG + "TRACE_EXIT #"
+                                + ACTIVE_CLICK.get()
+                                + " " + key
+                                + " result=" + safeValue(param.getResult())
+                                + " threw=" + (param.hasThrowable()
+                                ? error(param.getThrowable())
+                                : "none"));
+                    }
+                });
+
+                ModuleLog.line(TAG + "TRACE_HOOKED " + key);
+            } catch (Throwable t) {
+                HOOKED_TRACE_METHODS.remove(key);
+                ModuleLog.line(TAG + "TRACE_HOOK_FAILED "
+                        + key + " error=" + error(t));
+            }
         }
     }
 
-    private static Method findNoArgMethod(Class<?> start, String name) {
-        Class<?> cls = start;
+    private static void dumpDirectFields(String label, Object object) {
+        if (object == null || ACTIVE_CLICK.get() == null) return;
+
+        StringBuilder out = new StringBuilder();
+        out.append(TAG)
+                .append(label)
+                .append(" #")
+                .append(ACTIVE_CLICK.get())
+                .append(" class=")
+                .append(object.getClass().getName());
+
+        Class<?> cls = object.getClass();
 
         while (cls != null && cls != Object.class) {
+            Field[] fields;
+
             try {
-                return cls.getDeclaredMethod(name);
-            } catch (NoSuchMethodException ignored) {
-                cls = cls.getSuperclass();
-            } catch (Throwable ignored) {
-                return null;
+                fields = cls.getDeclaredFields();
+            } catch (Throwable t) {
+                break;
             }
+
+            for (Field field : fields) {
+                if (Modifier.isStatic(field.getModifiers())) continue;
+
+                Object value;
+                try {
+                    field.setAccessible(true);
+                    value = field.get(object);
+                } catch (Throwable t) {
+                    continue;
+                }
+
+                out.append("\n  ")
+                        .append(cls.getName())
+                        .append(".")
+                        .append(field.getName())
+                        .append("=")
+                        .append(safeValue(value));
+            }
+
+            cls = cls.getSuperclass();
         }
 
+        ModuleLog.line(out.toString());
+    }
+
+    private static void dumpStack(String label) {
         try {
-            return start.getMethod(name);
-        } catch (Throwable ignored) {
-            return null;
+            StringBuilder out = new StringBuilder();
+            out.append(TAG)
+                    .append(label)
+                    .append(" #")
+                    .append(ACTIVE_CLICK.get());
+
+            int added = 0;
+            for (StackTraceElement frame : new Throwable().getStackTrace()) {
+                String cls = frame.getClassName();
+
+                if (cls.equals(PfpClickDiagnostics.class.getName())
+                        || cls.startsWith("de.robv.android.xposed.")
+                        || cls.startsWith("java.lang.reflect.")
+                        || cls.startsWith("sun.reflect.")) {
+                    continue;
+                }
+
+                out.append("\n  ")
+                        .append(cls)
+                        .append(".")
+                        .append(frame.getMethodName())
+                        .append(":")
+                        .append(frame.getLineNumber());
+
+                if (++added >= 35) break;
+            }
+
+            ModuleLog.line(out.toString());
+        } catch (Throwable ignored) {}
+    }
+
+    private static String safeArgs(Object[] args) {
+        if (args == null || args.length == 0) return "[]";
+
+        StringBuilder out = new StringBuilder("[");
+
+        for (int i = 0; i < args.length; i++) {
+            if (i > 0) out.append(", ");
+            out.append(safeValue(args[i]));
         }
+
+        return out.append("]").toString();
+    }
+
+    private static String safeValue(Object value) {
+        if (value == null) return "null";
+
+        if (value instanceof Boolean
+                || value instanceof Byte
+                || value instanceof Short
+                || value instanceof Integer
+                || value instanceof Long
+                || value instanceof Float
+                || value instanceof Double
+                || value instanceof Character
+                || value.getClass().isEnum()) {
+            return value.getClass().getSimpleName() + "(" + value + ")";
+        }
+
+        if (value instanceof CharSequence) {
+            return value.getClass().getName()
+                    + "(length=" + ((CharSequence) value).length() + ")";
+        }
+
+        if (value instanceof View) {
+            return "View(" + describe((View) value) + ")";
+        }
+
+        if (value.getClass().isArray()) {
+            try {
+                return value.getClass().getName()
+                        + "(length=" + java.lang.reflect.Array.getLength(value) + ")";
+            } catch (Throwable ignored) {}
+        }
+
+        return "object(" + value.getClass().getName() + ")";
+    }
+
+    private static String signature(Method method) {
+        StringBuilder out = new StringBuilder(method.getName()).append("(");
+
+        Class<?>[] params = method.getParameterTypes();
+        for (int i = 0; i < params.length; i++) {
+            if (i > 0) out.append(",");
+            out.append(params[i].getName());
+        }
+
+        return out.append(")").toString();
     }
 
     private static Object unwrapDelegate(Object listener) {
@@ -322,6 +454,31 @@ public final class PfpClickDiagnostics {
 
     private static boolean isTarget(View view) {
         return TARGET_ID.equals(resourceName(view));
+    }
+
+    private static String describe(View view) {
+        return "class=" + view.getClass().getName()
+                + " id=" + resourceName(view)
+                + " size=" + view.getWidth() + "x" + view.getHeight()
+                + " visibility=" + view.getVisibility()
+                + " enabled=" + view.isEnabled()
+                + " clickable=" + view.isClickable();
+    }
+
+    private static String describeNullable(View view) {
+        return view == null ? "null" : describe(view);
+    }
+
+    private static String className(Object object) {
+        return object == null ? "null" : object.getClass().getName();
+    }
+
+    private static String error(Throwable t) {
+        if (t == null) return "null";
+
+        String message = t.getMessage();
+        return t.getClass().getName()
+                + (message == null ? "" : "(" + message + ")");
     }
 
     private static String resourceName(LayoutInflater inflater, int id) {
