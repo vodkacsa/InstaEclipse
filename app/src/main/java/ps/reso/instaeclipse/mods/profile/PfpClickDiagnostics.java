@@ -108,6 +108,52 @@ public final class PfpClickDiagnostics {
 
         try {
             XposedHelpers.findAndHookMethod(
+                    Activity.class,
+                    "dispatchTouchEvent",
+                    MotionEvent.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!(param.thisObject instanceof Activity)
+                                    || !(param.args[0] instanceof MotionEvent)) return;
+
+                            MotionEvent event = (MotionEvent) param.args[0];
+
+                            if (armed
+                                    && ACTIVE_CAPTURE.get() == null
+                                    && event.getActionMasked() == MotionEvent.ACTION_DOWN
+                                    && pointInside(latestTarget, event.getRawX(), event.getRawY())) {
+                                beginCapture(latestTarget, event);
+                            }
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (ACTIVE_CAPTURE.get() == null
+                                    || !(param.args[0] instanceof MotionEvent)) return;
+
+                            MotionEvent event = (MotionEvent) param.args[0];
+                            int action = event.getActionMasked();
+
+                            if (action == MotionEvent.ACTION_UP
+                                    || action == MotionEvent.ACTION_CANCEL) {
+                                captureLog("ACTIVITY_TOUCH_END #"
+                                        + ACTIVE_CAPTURE.get()
+                                        + " action=" + actionName(action)
+                                        + " result=" + safeValue(param.getResult())
+                                        + " opened=" + OPENED.get());
+
+                                finishCapture(((Activity) param.thisObject));
+                            }
+                        }
+                    }
+            );
+        } catch (Throwable t) {
+            ModuleLog.line(TAG + "activity dispatch hook failed=" + error(t));
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
                     View.class,
                     "dispatchTouchEvent",
                     MotionEvent.class,
@@ -122,10 +168,12 @@ public final class PfpClickDiagnostics {
                             View view = (View) param.thisObject;
                             MotionEvent event = (MotionEvent) param.args[0];
 
-                            if (!armed || view != latestTarget) return;
-                            if (event.getActionMasked() != MotionEvent.ACTION_DOWN) return;
+                            if (ACTIVE_CAPTURE.get() == null) return;
 
-                            beginCapture(view, event);
+                            captureLog("VIEW_TOUCH_BEGIN #"
+                                    + ACTIVE_CAPTURE.get()
+                                    + " action=" + actionName(event.getActionMasked())
+                                    + " view=" + describe(view));
                         }
 
                         @Override
@@ -138,20 +186,13 @@ public final class PfpClickDiagnostics {
                             View view = (View) param.thisObject;
                             MotionEvent event = (MotionEvent) param.args[0];
 
-                            if (view != latestTarget) return;
                             if (ACTIVE_CAPTURE.get() == null) return;
 
-                            int action = event.getActionMasked();
-
-                            if (action == MotionEvent.ACTION_UP
-                                    || action == MotionEvent.ACTION_CANCEL) {
-                                captureLog("TOUCH_END #" + ACTIVE_CAPTURE.get()
-                                        + " action=" + actionName(action)
-                                        + " dispatchResult=" + safeValue(param.getResult())
-                                        + " opened=" + OPENED.get());
-
-                                finishCapture(view.getContext());
-                            }
+                            captureLog("VIEW_TOUCH_END #"
+                                    + ACTIVE_CAPTURE.get()
+                                    + " action=" + actionName(event.getActionMasked())
+                                    + " view=" + describe(view)
+                                    + " result=" + safeValue(param.getResult()));
                         }
                     }
             );
@@ -740,6 +781,18 @@ public final class PfpClickDiagnostics {
         }
 
         return current instanceof Activity ? (Activity) current : null;
+    }
+
+    private static boolean pointInside(View view, float x, float y) {
+        if (view == null || !view.isAttachedToWindow()) return false;
+
+        try {
+            Rect rect = new Rect();
+            return view.getGlobalVisibleRect(rect)
+                    && rect.contains(Math.round(x), Math.round(y));
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static String actionName(int action) {
