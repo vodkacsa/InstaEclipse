@@ -33,7 +33,7 @@ import ps.reso.instaeclipse.utils.log.ModuleLog;
 /**
  * Manually armed PFP click diagnostics.
  *
- * A small floating "PFP LOG" button is added while a profile header is present.
+ * A small floating "PFP LOG" button is added to every Instagram Activity.
  * Pressing it arms exactly one capture. The next touch dispatched through the
  * current profile-picture frame starts logging before Instagram handles the
  * event, so the capture still works when performClick() never happens.
@@ -78,14 +78,14 @@ public final class PfpClickDiagnostics {
         installBaseHooks();
         installKnownPathHooks(view.getClass().getClassLoader());
 
-        if (!isTarget(view)) return;
-
-        latestTarget = view;
-
         Activity activity = activityFromContext(view.getContext());
         if (activity != null) {
             ensureFloatingButton(activity);
         }
+
+        if (!isTarget(view)) return;
+
+        latestTarget = view;
 
         view.post(() -> {
             try {
@@ -340,7 +340,7 @@ public final class PfpClickDiagnostics {
 
             TextView button = new TextView(activity);
             button.setTag(BUTTON_TAG);
-            button.setText("PFP LOG");
+            button.setText(armed ? "ARMED" : "PFP LOG");
             button.setTextColor(0xFFFFFFFF);
             button.setTextSize(12f);
             button.setGravity(Gravity.CENTER);
@@ -362,17 +362,6 @@ public final class PfpClickDiagnostics {
             params.rightMargin = dp(activity, 14);
 
             button.setOnClickListener(v -> {
-                View target = latestTarget;
-
-                if (target == null || !target.isAttachedToWindow()) {
-                    Toast.makeText(
-                            activity,
-                            "Open a profile first",
-                            Toast.LENGTH_SHORT
-                    ).show();
-                    return;
-                }
-
                 armed = true;
                 latestButton = button;
                 updateButton(true);
