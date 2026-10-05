@@ -70,12 +70,18 @@ public final class PfpClickDiagnostics {
             Collections.synchronizedSet(new HashSet<>());
     private static final Set<Class<?>> HOOKED_CALLBACK_CLASSES =
             Collections.synchronizedSet(new HashSet<>());
+    private static final Set<Class<?>> HOOKED_DUO_TRACKER_CLASSES =
+            Collections.synchronizedSet(new HashSet<>());
 
     private static final WeakHashMap<Activity, View> NORMAL_TARGETS =
             new WeakHashMap<>();
     private static final WeakHashMap<Activity, View> COINFLIP_TARGETS =
             new WeakHashMap<>();
     private static final WeakHashMap<Activity, TextView> PANEL_LOGS =
+            new WeakHashMap<>();
+    private static final WeakHashMap<Object, String> DUO_LAST_STATE =
+            new WeakHashMap<>();
+    private static final WeakHashMap<Object, StringBuilder> DUO_HISTORY =
             new WeakHashMap<>();
 
     private static volatile boolean installed;
@@ -302,6 +308,7 @@ public final class PfpClickDiagnostics {
         );
         hookNamedMethods(loader, "X.DUO", "GLY");
         hookNamedMethods(loader, "X.DUO", "A00");
+        installDuoInitTracker(loader);
     }
 
     private static void hookNamedMethods(
@@ -414,6 +421,8 @@ public final class PfpClickDiagnostics {
                                     + fieldSummary(arg(param.args, 1), 12));
                             diag("DUO state: "
                                     + fieldSummary(param.thisObject, 12));
+                            diag("DUO init history:\n"
+                                    + duoHistory(param.thisObject));
                         }
                     }
 
@@ -632,6 +641,107 @@ public final class PfpClickDiagnostics {
         } catch (Throwable t) {
             ModuleLog.line(TAG + "clipboard failed: " + error(t));
         }
+    }
+
+    private static void installDuoInitTracker(ClassLoader loader) {
+        Class<?> cls;
+
+        try {
+            cls = Class.forName("X.DUO", false, loader);
+        } catch (Throwable ignored) {
+            return;
+        }
+
+        if (!HOOKED_DUO_TRACKER_CLASSES.add(cls)) return;
+
+        for (Method method : cls.getDeclaredMethods()) {
+            try {
+                method.setAccessible(true);
+                String key = "DUO." + signature(method);
+
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        recordDuoState(param.thisObject, "before " + key);
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        recordDuoState(param.thisObject, "after " + key);
+                    }
+                });
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private static void recordDuoState(Object duo, String where) {
+        if (duo == null) return;
+
+        String state = duoTrackedState(duo);
+
+        synchronized (DUO_LAST_STATE) {
+            String previous = DUO_LAST_STATE.get(duo);
+            if (state.equals(previous)) return;
+
+            DUO_LAST_STATE.put(duo, state);
+
+            StringBuilder history = DUO_HISTORY.get(duo);
+            if (history == null) {
+                history = new StringBuilder();
+                DUO_HISTORY.put(duo, history);
+            }
+
+            if (history.length() > 0) history.append('\n');
+            history.append(where).append(" -> ").append(state);
+
+            if (history.length() > 2200) {
+                history.delete(0, history.length() - 1800);
+            }
+        }
+    }
+
+    private static String duoTrackedState(Object duo) {
+        return "A01=" + trackedField(duo, "A01")
+                + " | A02=" + trackedField(duo, "A02")
+                + " | A05=" + trackedField(duo, "A05")
+                + " | A0A=" + trackedField(duo, "A0A");
+    }
+
+    private static String duoHistory(Object duo) {
+        if (duo == null) return "<null DUO>";
+
+        synchronized (DUO_LAST_STATE) {
+            StringBuilder history = DUO_HISTORY.get(duo);
+            return history == null || history.length() == 0
+                    ? "<no recorded transitions>"
+                    : history.toString();
+        }
+    }
+
+    private static String trackedField(Object object, String name) {
+        if (object == null) return "null";
+
+        Class<?> cls = object.getClass();
+
+        while (cls != null && cls != Object.class) {
+            try {
+                Field field = cls.getDeclaredField(name);
+                field.setAccessible(true);
+                Object value = field.get(object);
+
+                if (value instanceof View) {
+                    return shortView((View) value);
+                }
+
+                return compactValue(value);
+            } catch (NoSuchFieldException ignored) {
+                cls = cls.getSuperclass();
+            } catch (Throwable ignored) {
+                return "?";
+            }
+        }
+
+        return "<missing>";
     }
 
     private static void hookCallback(Object callback) {
