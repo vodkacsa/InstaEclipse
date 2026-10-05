@@ -72,6 +72,8 @@ public final class PfpClickDiagnostics {
             Collections.synchronizedSet(new HashSet<>());
     private static final Set<Class<?>> HOOKED_DUO_TRACKER_CLASSES =
             Collections.synchronizedSet(new HashSet<>());
+    private static final Set<Class<?>> HOOKED_USER_DETAIL_TRACKER_CLASSES =
+            Collections.synchronizedSet(new HashSet<>());
 
     private static final WeakHashMap<Activity, View> NORMAL_TARGETS =
             new WeakHashMap<>();
@@ -85,6 +87,7 @@ public final class PfpClickDiagnostics {
             new WeakHashMap<>();
 
     private static volatile boolean installed;
+    private static volatile Field userDetailDuoField;
 
     private PfpClickDiagnostics() {}
 
@@ -309,6 +312,7 @@ public final class PfpClickDiagnostics {
         hookNamedMethods(loader, "X.DUO", "GLY");
         hookNamedMethods(loader, "X.DUO", "A00");
         installDuoInitTracker(loader);
+        installUserDetailInitTracker(loader);
     }
 
     private static void hookNamedMethods(
@@ -640,6 +644,86 @@ public final class PfpClickDiagnostics {
             }
         } catch (Throwable t) {
             ModuleLog.line(TAG + "clipboard failed: " + error(t));
+        }
+    }
+
+    private static void installUserDetailInitTracker(ClassLoader loader) {
+        Class<?> fragmentClass;
+        Class<?> duoClass;
+
+        try {
+            fragmentClass = Class.forName(
+                    "com.instagram.profile.fragment.UserDetailFragment",
+                    false,
+                    loader
+            );
+            duoClass = Class.forName("X.DUO", false, loader);
+        } catch (Throwable ignored) {
+            return;
+        }
+
+        if (!HOOKED_USER_DETAIL_TRACKER_CLASSES.add(fragmentClass)) return;
+
+        userDetailDuoField = findFieldByType(fragmentClass, duoClass);
+
+        if (userDetailDuoField == null) {
+            ModuleLog.line(TAG + "UserDetail DUO field not found");
+            return;
+        }
+
+        for (Method method : fragmentClass.getDeclaredMethods()) {
+            try {
+                method.setAccessible(true);
+                String key = "UserDetail." + signature(method);
+
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        Object duo = readUserDetailDuo(param.thisObject);
+                        if (duo != null) {
+                            recordDuoState(duo, "before " + key);
+                        }
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Object duo = readUserDetailDuo(param.thisObject);
+                        if (duo != null) {
+                            recordDuoState(duo, "after " + key);
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private static Field findFieldByType(Class<?> owner, Class<?> wantedType) {
+        Class<?> cls = owner;
+
+        while (cls != null && cls != Object.class) {
+            for (Field field : cls.getDeclaredFields()) {
+                try {
+                    if (wantedType.isAssignableFrom(field.getType())) {
+                        field.setAccessible(true);
+                        return field;
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            cls = cls.getSuperclass();
+        }
+
+        return null;
+    }
+
+    private static Object readUserDetailDuo(Object fragment) {
+        Field field = userDetailDuoField;
+        if (field == null || fragment == null) return null;
+
+        try {
+            return field.get(fragment);
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
