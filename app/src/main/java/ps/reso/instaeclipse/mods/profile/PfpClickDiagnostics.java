@@ -681,6 +681,14 @@ public final class PfpClickDiagnostics {
                     protected void beforeHookedMethod(MethodHookParam param) {
                         Object duo = readUserDetailDuo(param.thisObject);
                         if (duo != null) {
+                            if ("A0d".equals(method.getName())) {
+                                appendDuoHistory(
+                                        duo,
+                                        "CALL " + key
+                                                + " args=" + argsSummary(param.args, 8)
+                                                + "\nA0d callers: " + compactCallStack()
+                                );
+                            }
                             recordDuoState(duo, "before " + key);
                         }
                     }
@@ -756,6 +764,86 @@ public final class PfpClickDiagnostics {
                 });
             } catch (Throwable ignored) {}
         }
+    }
+
+    private static void appendDuoHistory(Object duo, String line) {
+        if (duo == null || line == null || line.isEmpty()) return;
+
+        synchronized (DUO_LAST_STATE) {
+            StringBuilder history = DUO_HISTORY.get(duo);
+            if (history == null) {
+                history = new StringBuilder();
+                DUO_HISTORY.put(duo, history);
+            }
+
+            if (history.length() > 0) history.append('\n');
+            history.append(line);
+
+            if (history.length() > 3600) {
+                history.delete(0, history.length() - 3000);
+            }
+        }
+    }
+
+    private static String argsSummary(Object[] args, int limit) {
+        if (args == null || args.length == 0) return "[]";
+
+        StringBuilder out = new StringBuilder("[");
+        int count = Math.min(args.length, Math.max(0, limit));
+
+        for (int i = 0; i < count; i++) {
+            if (i > 0) out.append(", ");
+            Object value = args[i];
+
+            out.append(i).append('=');
+            if (value == null) {
+                out.append("null");
+            } else if (value instanceof Boolean
+                    || value instanceof Number
+                    || value instanceof Character
+                    || value.getClass().isEnum()) {
+                out.append(String.valueOf(value));
+            } else {
+                out.append(value.getClass().getName())
+                        .append('{')
+                        .append(fieldSummary(value, 6))
+                        .append('}');
+            }
+        }
+
+        if (args.length > count) {
+            out.append(", …+").append(args.length - count);
+        }
+
+        return out.append(']').toString();
+    }
+
+    private static String compactCallStack() {
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        StringBuilder out = new StringBuilder();
+        int added = 0;
+
+        for (StackTraceElement frame : stack) {
+            String cls = frame.getClassName();
+
+            if (cls.equals(Thread.class.getName())
+                    || cls.equals(PfpClickDiagnostics.class.getName())
+                    || cls.startsWith("de.robv.android.xposed.")
+                    || cls.startsWith("java.lang.reflect.")
+                    || cls.startsWith("jdk.internal.reflect.")) {
+                continue;
+            }
+
+            if (added > 0) out.append(" <- ");
+            out.append(cls)
+                    .append('.')
+                    .append(frame.getMethodName());
+
+            added++;
+            if (added >= 10) break;
+        }
+
+        return out.length() == 0 ? "<no useful frames>" : out.toString();
     }
 
     private static void recordDuoState(Object duo, String where) {
