@@ -68,6 +68,8 @@ public final class PfpClickDiagnostics {
 
     private static final Set<String> HOOKED_TRACE_METHODS =
             Collections.synchronizedSet(new HashSet<>());
+    private static final Set<Class<?>> HOOKED_CALLBACK_CLASSES =
+            Collections.synchronizedSet(new HashSet<>());
 
     private static final WeakHashMap<Activity, View> NORMAL_TARGETS =
             new WeakHashMap<>();
@@ -158,6 +160,60 @@ public final class PfpClickDiagnostics {
             );
         } catch (Throwable t) {
             ModuleLog.line(TAG + "activity touch hook failed: " + error(t));
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    View.class,
+                    "dispatchTouchEvent",
+                    MotionEvent.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (ACTIVE_CAPTURE.get() == null) return;
+                            if (!(param.thisObject instanceof View)
+                                    || !(param.args[0] instanceof MotionEvent)) return;
+
+                            View view = (View) param.thisObject;
+                            MotionEvent event = (MotionEvent) param.args[0];
+                            int action = event.getActionMasked();
+
+                            if ((action == MotionEvent.ACTION_DOWN
+                                    || action == MotionEvent.ACTION_UP)
+                                    && Boolean.TRUE.equals(param.getResult())
+                                    && isAvatarRelated(view)) {
+                                diag("touch-consumer " + actionName(action)
+                                        + " " + shortView(view));
+                            }
+                        }
+                    }
+            );
+        } catch (Throwable t) {
+            ModuleLog.line(TAG + "view touch hook failed: " + error(t));
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    View.class,
+                    "performClick",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (ACTIVE_CAPTURE.get() == null) return;
+                            if (!(param.thisObject instanceof View)) return;
+
+                            View view = (View) param.thisObject;
+                            if (!isAvatarRelated(view)) return;
+
+                            Object listener = clickListener(view);
+                            diag("performClick " + shortView(view)
+                                    + " listener=" + className(listener)
+                                    + " delegate=" + className(unwrapA00(listener)));
+                        }
+                    }
+            );
+        } catch (Throwable t) {
+            ModuleLog.line(TAG + "performClick hook failed: " + error(t));
         }
 
         try {
@@ -294,6 +350,7 @@ public final class PfpClickDiagnostics {
                                     ? param.args[6]
                                     : null;
 
+                            hookCallback(callback);
                             diag("EeU rect=" + compactRect(rect)
                                     + " source=" + shortObject(source)
                                     + " cb=" + className(callback));
@@ -316,34 +373,47 @@ public final class PfpClickDiagnostics {
                         }
 
                         if ("X.C7D".equals(className)) {
+                            Object callback = arg(param.args, 2);
+                            hookCallback(callback);
                             diag("→ C7D type=" + safeEnumish(arg(param.args, 0))
-                                    + " cb=" + className(arg(param.args, 2)));
+                                    + " model=" + fieldSummary(arg(param.args, 1), 8)
+                                    + " cb=" + className(callback));
                             return;
                         }
 
                         if ("com.instagram.profile.fragment.UserDetailFragment"
                                 .equals(className)) {
+                            Object callback = arg(param.args, 2);
+                            hookCallback(callback);
                             diag("→ UserDetail.GLY type="
                                     + safeEnumish(arg(param.args, 0))
-                                    + " cb=" + className(arg(param.args, 2)));
+                                    + " model=" + fieldSummary(arg(param.args, 1), 8)
+                                    + " cb=" + className(callback));
                             return;
                         }
 
                         if ("X.DUO".equals(className)
                                 && "GLY".equals(methodName)) {
-                            diag("→ DUO.GLY cb="
-                                    + className(arg(param.args, 2)));
+                            Object callback = arg(param.args, 2);
+                            hookCallback(callback);
+                            diag("→ DUO.GLY model="
+                                    + fieldSummary(arg(param.args, 1), 8)
+                                    + " cb=" + className(callback));
                             return;
                         }
 
                         if ("X.DUO".equals(className)
                                 && "A00".equals(methodName)) {
+                            Object callback = arg(param.args, 2);
+                            hookCallback(callback);
                             diag("→ DUO.A00 type="
                                     + safeEnumish(arg(param.args, 0))
                                     + " model=" + className(arg(param.args, 1))
-                                    + " cb=" + className(arg(param.args, 2)));
+                                    + " cb=" + className(callback));
+                            diag("EMz state: "
+                                    + fieldSummary(arg(param.args, 1), 12));
                             diag("DUO state: "
-                                    + fieldSummary(param.thisObject, 10));
+                                    + fieldSummary(param.thisObject, 12));
                         }
                     }
 
@@ -562,6 +632,101 @@ public final class PfpClickDiagnostics {
         } catch (Throwable t) {
             ModuleLog.line(TAG + "clipboard failed: " + error(t));
         }
+    }
+
+    private static void hookCallback(Object callback) {
+        if (callback == null) return;
+
+        Class<?> cls = callback.getClass();
+        if (!HOOKED_CALLBACK_CLASSES.add(cls)) return;
+
+        boolean hookedAny = false;
+
+        for (Method method : cls.getDeclaredMethods()) {
+            if (!"invoke".equals(method.getName())
+                    || method.getParameterTypes().length != 0) {
+                continue;
+            }
+
+            try {
+                method.setAccessible(true);
+                hookedAny = true;
+
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (ACTIVE_CAPTURE.get() != null) {
+                            diag("callback " + cls.getName() + ".invoke()");
+                        }
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (ACTIVE_CAPTURE.get() != null) {
+                            diag("callback-result "
+                                    + cls.getName()
+                                    + " -> "
+                                    + compactValue(param.getResult())
+                                    + " threw="
+                                    + (param.hasThrowable()
+                                    ? error(param.getThrowable())
+                                    : "none"));
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+        }
+
+        if (!hookedAny) {
+            HOOKED_CALLBACK_CLASSES.remove(cls);
+        }
+    }
+
+    private static boolean isAvatarRelated(View view) {
+        if (view == null) return false;
+
+        String id = resourceName(view);
+        String cls = view.getClass().getName();
+
+        return NORMAL_TARGET_ID.equals(id)
+                || COINFLIP_TARGET_ID.equals(id)
+                || "profile_header_avatar_container_top_left_stub".equals(id)
+                || "row_profile_header_imageview".equals(id)
+                || "profilePic".equals(id)
+                || cls.contains("ProfileCoinFlip")
+                || cls.contains("CircularImageView");
+    }
+
+    private static Object clickListener(View view) {
+        if (view == null) return null;
+
+        try {
+            Object info = XposedHelpers.getObjectField(view, "mListenerInfo");
+            return info == null
+                    ? null
+                    : XposedHelpers.getObjectField(info, "mOnClickListener");
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object unwrapA00(Object object) {
+        if (object == null) return null;
+
+        try {
+            Field field = object.getClass().getDeclaredField("A00");
+            field.setAccessible(true);
+            return field.get(object);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static String actionName(int action) {
+        if (action == MotionEvent.ACTION_DOWN) return "DOWN";
+        if (action == MotionEvent.ACTION_UP) return "UP";
+        if (action == MotionEvent.ACTION_CANCEL) return "CANCEL";
+        return String.valueOf(action);
     }
 
     private static String fieldSummary(Object object, int limit) {
