@@ -62,6 +62,7 @@ public final class PfpClickDiagnostics {
 
     private static final ThreadLocal<Integer> ACTIVE_CAPTURE = new ThreadLocal<>();
     private static final ThreadLocal<Activity> ACTIVE_ACTIVITY = new ThreadLocal<>();
+    private static final ThreadLocal<View> ACTIVE_TARGET = new ThreadLocal<>();
     private static final ThreadLocal<Boolean> OPENED =
             ThreadLocal.withInitial(() -> false);
     private static final ThreadLocal<Map<String, String>> A0D_BEFORE_FRAGMENT_STATE =
@@ -79,6 +80,8 @@ public final class PfpClickDiagnostics {
     private static final Set<Class<?>> HOOKED_DUO_TRACKER_CLASSES =
             Collections.synchronizedSet(new HashSet<>());
     private static final Set<Class<?>> HOOKED_USER_DETAIL_TRACKER_CLASSES =
+            Collections.synchronizedSet(new HashSet<>());
+    private static final Set<String> HOOKED_TARGET_LISTENER_METHODS =
             Collections.synchronizedSet(new HashSet<>());
 
     private static final WeakHashMap<Activity, View> NORMAL_TARGETS =
@@ -279,6 +282,7 @@ public final class PfpClickDiagnostics {
 
         ACTIVE_CAPTURE.set(capture);
         ACTIVE_ACTIVITY.set(activity);
+        ACTIVE_TARGET.set(target);
         OPENED.set(false);
 
         String path = isCoinFlip(target) ? "COINFLIP" : "NORMAL";
@@ -291,6 +295,8 @@ public final class PfpClickDiagnostics {
                 : rect.left + "," + rect.top + "," + rect.right + "," + rect.bottom));
         diag("tap=" + Math.round(event.getRawX())
                 + "," + Math.round(event.getRawY()));
+
+        logTargetListeners(target);
     }
 
     private static void finishCapture(Activity activity) {
@@ -302,6 +308,7 @@ public final class PfpClickDiagnostics {
 
         ACTIVE_CAPTURE.remove();
         ACTIVE_ACTIVITY.remove();
+        ACTIVE_TARGET.remove();
         OPENED.remove();
     }
 
@@ -657,6 +664,124 @@ public final class PfpClickDiagnostics {
             }
         } catch (Throwable t) {
             ModuleLog.line(TAG + "clipboard failed: " + error(t));
+        }
+    }
+
+    private static void logTargetListeners(View target) {
+        Object click = listenerInfoField(target, "mOnClickListener");
+        Object touch = listenerInfoField(target, "mOnTouchListener");
+        Object longClick = listenerInfoField(target, "mOnLongClickListener");
+
+        diag("listeners click=" + className(click)
+                + " delegate=" + className(unwrapA00(click))
+                + " touch=" + className(touch)
+                + " long=" + className(longClick)
+                + " clickable=" + target.isClickable()
+                + " longClickable=" + target.isLongClickable());
+
+        hookTargetListener(click, "onClick");
+        hookTargetListener(touch, "onTouch");
+    }
+
+    private static Object listenerInfoField(View view, String name) {
+        if (view == null) return null;
+
+        try {
+            Object info = XposedHelpers.getObjectField(view, "mListenerInfo");
+            return info == null ? null : XposedHelpers.getObjectField(info, name);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void hookTargetListener(Object listener, String methodName) {
+        if (listener == null) return;
+
+        Class<?> cls = listener.getClass();
+        String hookKey = cls.getName() + "#" + methodName;
+        if (!HOOKED_TARGET_LISTENER_METHODS.add(hookKey)) return;
+
+        boolean hookedAny = false;
+        Class<?> current = cls;
+
+        while (current != null && current != Object.class) {
+            Method[] methods;
+
+            try {
+                methods = current.getDeclaredMethods();
+            } catch (Throwable t) {
+                break;
+            }
+
+            for (Method method : methods) {
+                if (!methodName.equals(method.getName())) continue;
+
+                Class<?>[] params = method.getParameterTypes();
+
+                if ("onClick".equals(methodName)) {
+                    if (params.length != 1
+                            || !View.class.isAssignableFrom(params[0])) {
+                        continue;
+                    }
+                } else if ("onTouch".equals(methodName)) {
+                    if (params.length != 2
+                            || !View.class.isAssignableFrom(params[0])
+                            || !MotionEvent.class.isAssignableFrom(params[1])) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+
+                try {
+                    method.setAccessible(true);
+                    hookedAny = true;
+
+                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (ACTIVE_CAPTURE.get() == null) return;
+                            if (param.args.length == 0
+                                    || param.args[0] != ACTIVE_TARGET.get()) return;
+
+                            if ("onClick".equals(methodName)) {
+                                diag("listener.onClick " + cls.getName()
+                                        + " delegate="
+                                        + className(unwrapA00(param.thisObject)));
+                            } else if ("onTouch".equals(methodName)
+                                    && param.args.length > 1
+                                    && param.args[1] instanceof MotionEvent) {
+                                MotionEvent event = (MotionEvent) param.args[1];
+                                diag("listener.onTouch " + cls.getName()
+                                        + " " + actionName(event.getActionMasked()));
+                            }
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (ACTIVE_CAPTURE.get() == null) return;
+                            if (!"onTouch".equals(methodName)) return;
+                            if (param.args.length == 0
+                                    || param.args[0] != ACTIVE_TARGET.get()) return;
+
+                            diag("listener.onTouch-result "
+                                    + cls.getName()
+                                    + " -> "
+                                    + compactValue(param.getResult())
+                                    + " threw="
+                                    + (param.hasThrowable()
+                                    ? error(param.getThrowable())
+                                    : "none"));
+                        }
+                    });
+                } catch (Throwable ignored) {}
+            }
+
+            current = current.getSuperclass();
+        }
+
+        if (!hookedAny) {
+            HOOKED_TARGET_LISTENER_METHODS.remove(hookKey);
         }
     }
 
