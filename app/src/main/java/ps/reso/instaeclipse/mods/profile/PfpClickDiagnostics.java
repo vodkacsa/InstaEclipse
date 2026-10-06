@@ -849,6 +849,15 @@ public final class PfpClickDiagnostics {
                                 "before " + key
                         );
 
+                        if (isGateBranchMethod(method.getName())) {
+                            appendFragmentGateHistory(
+                                    param.thisObject,
+                                    "CALL " + key
+                                            + " args=" + argsSummary(param.args, 6)
+                                            + "\ncallers: " + compactCallStack()
+                            );
+                        }
+
                         Object duo = readUserDetailDuo(param.thisObject);
                         if (duo != null) {
                             if ("A0d".equals(method.getName())) {
@@ -905,6 +914,18 @@ public final class PfpClickDiagnostics {
                                 param.thisObject,
                                 "after " + key
                         );
+
+                        if (isGateBranchMethod(method.getName())) {
+                            appendFragmentGateHistory(
+                                    param.thisObject,
+                                    "RETURN " + key
+                                            + " result=" + compactValue(param.getResult())
+                                            + " threw="
+                                            + (param.hasThrowable()
+                                            ? error(param.getThrowable())
+                                            : "none")
+                            );
+                        }
                     }
                 });
             } catch (Throwable ignored) {}
@@ -969,6 +990,34 @@ public final class PfpClickDiagnostics {
                     }
                 });
             } catch (Throwable ignored) {}
+        }
+    }
+
+    private static boolean isGateBranchMethod(String name) {
+        return "A0m".equals(name)
+                || "A1D".equals(name)
+                || "A1E".equals(name);
+    }
+
+    private static void appendFragmentGateHistory(
+            Object fragment,
+            String line
+    ) {
+        if (fragment == null || line == null || line.isEmpty()) return;
+
+        synchronized (FRAGMENT_GATE_LAST) {
+            StringBuilder history = FRAGMENT_GATE_HISTORY.get(fragment);
+            if (history == null) {
+                history = new StringBuilder();
+                FRAGMENT_GATE_HISTORY.put(fragment, history);
+            }
+
+            if (history.length() > 0) history.append('\n');
+            history.append(line);
+
+            if (history.length() > 5200) {
+                history.delete(0, history.length() - 4400);
+            }
         }
     }
 
