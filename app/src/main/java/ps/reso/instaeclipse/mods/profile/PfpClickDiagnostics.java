@@ -988,13 +988,51 @@ public final class PfpClickDiagnostics {
     }
 
     private static void installDuoWriterDiagnosticsAsync(
-            ClassLoader loader
+            ClassLoader fallbackLoader
     ) {
-        if (loader == null || !WRITER_SCAN_STARTED.compareAndSet(false, true)) {
+        if (WRITER_SCAN_STARTED.get()) return;
+
+        Class<?> resolvedDuo = null;
+        ClassLoader resolvedLoader = null;
+
+        ClassLoader hostLoader =
+                ps.reso.instaeclipse.Xposed.Module.hostClassLoader;
+
+        if (hostLoader != null) {
+            try {
+                resolvedDuo = Class.forName(
+                        "X.DUO",
+                        false,
+                        hostLoader
+                );
+                resolvedLoader = hostLoader;
+            } catch (Throwable ignored) {}
+        }
+
+        if (resolvedDuo == null && fallbackLoader != null) {
+            try {
+                resolvedDuo = Class.forName(
+                        "X.DUO",
+                        false,
+                        fallbackLoader
+                );
+                resolvedLoader = fallbackLoader;
+            } catch (Throwable ignored) {}
+        }
+
+        // Early observeAttached() calls can come from framework Views. Do not
+        // permanently latch a loader that cannot see Instagram classes.
+        if (resolvedDuo == null || resolvedLoader == null) {
+            writerScanStatus = "waiting for IG classloader";
             return;
         }
 
-        writerScanStatus = "scanning";
+        if (!WRITER_SCAN_STARTED.compareAndSet(false, true)) return;
+
+        final Class<?> duoClass = resolvedDuo;
+        final ClassLoader loader = resolvedLoader;
+        duoRuntimeClass = duoClass;
+        writerScanStatus = "scanning " + loader.getClass().getSimpleName();
 
         Thread worker = new Thread(() -> {
             try {
@@ -1002,11 +1040,9 @@ public final class PfpClickDiagnostics {
                         ps.reso.instaeclipse.Xposed.Module.dexKitBridge;
                 if (bridge == null) {
                     writerScanStatus = "no DexKit bridge";
+                    WRITER_SCAN_STARTED.set(false);
                     return;
                 }
-
-                Class<?> duoClass = Class.forName("X.DUO", false, loader);
-                duoRuntimeClass = duoClass;
 
                 try {
                     XposedBridge.hookAllConstructors(
@@ -1069,7 +1105,12 @@ public final class PfpClickDiagnostics {
                                 writer.setAccessible(true);
                                 hookDuoWriter(writer, duoClass);
                                 totalHooks++;
-                            } catch (Throwable ignored) {}
+                            } catch (Throwable t) {
+                                ModuleLog.line(
+                                        TAG + "writer hook resolve failed "
+                                                + data + ": " + error(t)
+                                );
+                            }
                         }
                     } catch (Throwable t) {
                         ModuleLog.line(
@@ -1089,6 +1130,7 @@ public final class PfpClickDiagnostics {
                 ModuleLog.line(TAG + writerScanStatus);
             } catch (Throwable t) {
                 writerScanStatus = "failed " + error(t);
+                WRITER_SCAN_STARTED.set(false);
                 ModuleLog.line(TAG + "writer scan failed: " + error(t));
             }
         }, "IE-PFP-DUO-writers");
