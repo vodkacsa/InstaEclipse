@@ -77,6 +77,8 @@ public final class PfpClickDiagnostics {
             new ThreadLocal<>();
     private static final ThreadLocal<Boolean> A0D_DUO_READY_BEFORE =
             new ThreadLocal<>();
+    private static final ThreadLocal<Object> A0D_BRANCH_DUO =
+            new ThreadLocal<>();
 
     private static final Object BUFFER_LOCK = new Object();
     private static final StringBuilder BUFFER = new StringBuilder();
@@ -94,6 +96,8 @@ public final class PfpClickDiagnostics {
     private static final Set<Class<?>> HOOKED_GATE_OBJECT_CLASSES =
             Collections.synchronizedSet(new HashSet<>());
     private static final Set<String> HOOKED_DUO_WRITER_METHODS =
+            Collections.synchronizedSet(new HashSet<>());
+    private static final Set<String> HOOKED_A0D_INVOKES =
             Collections.synchronizedSet(new HashSet<>());
 
     private static final WeakHashMap<Activity, View> NORMAL_TARGETS =
@@ -116,10 +120,15 @@ public final class PfpClickDiagnostics {
             new WeakHashMap<>();
     private static final WeakHashMap<Object, StringBuilder> DUO_WRITER_HISTORY =
             new WeakHashMap<>();
+    private static final WeakHashMap<Object, StringBuilder> A0D_BRANCH_HISTORY =
+            new WeakHashMap<>();
+    private static final java.util.List<Field> A0D_READ_FIELDS =
+            Collections.synchronizedList(new java.util.ArrayList<>());
 
     private static volatile Map<String, String> SUCCESS_A0D_FRAGMENT_STATE;
     private static volatile boolean installed;
     private static volatile boolean writerScanReady;
+    private static volatile boolean a0dStaticReady;
     private static volatile String writerScanStatus = "not started";
     private static volatile Field userDetailDuoField;
     private static volatile Class<?> duoRuntimeClass;
@@ -489,6 +498,8 @@ public final class PfpClickDiagnostics {
                             diag("DUO identity=" + duoIdentity(param.thisObject));
                             diag("DUO writer history:\n"
                                     + duoWriterHistory(param.thisObject));
+                            diag("A0d branch history:\n"
+                                    + a0dBranchHistory(param.thisObject));
                             diag("DUO init history:\n"
                                     + duoHistory(param.thisObject));
                             Object fragment = readNamedField(param.thisObject, "A06");
@@ -902,6 +913,20 @@ public final class PfpClickDiagnostics {
                                                 + " args=" + argsSummary(param.args, 8)
                                                 + "\nA0d callers: " + compactCallStack()
                                 );
+
+                                if (calledFromUserDetailMethod("A16")) {
+                                    A0D_BRANCH_DUO.set(duo);
+                                    appendA0dBranchHistory(
+                                            duo,
+                                            "A16 A0d START args="
+                                                    + argsSummary(param.args, 4)
+                                                    + "\n  reads="
+                                                    + a0dReadSnapshot(
+                                                            param.thisObject,
+                                                            param.args
+                                                    )
+                                    );
+                                }
                             }
                             recordDuoState(duo, "before " + key);
                         }
@@ -926,6 +951,19 @@ public final class PfpClickDiagnostics {
                                             duo,
                                             "A0d SUCCESS baseline learned"
                                     );
+                                }
+
+                                if (A0D_BRANCH_DUO.get() == duo) {
+                                    appendA0dBranchHistory(
+                                            duo,
+                                            "A16 A0d END ready=" + readyAfter
+                                                    + "\n  reads="
+                                                    + a0dReadSnapshot(
+                                                            param.thisObject,
+                                                            param.args
+                                                    )
+                                    );
+                                    A0D_BRANCH_DUO.remove();
                                 }
 
                                 A0D_BEFORE_FRAGMENT_STATE.remove();
@@ -1124,9 +1162,13 @@ public final class PfpClickDiagnostics {
                 }
 
                 writerScanReady = true;
+                installA0dBranchDiagnostics(bridge, loader);
                 writerScanStatus = "ready hooks=" + totalHooks
                         + " matches=" + totalMatches
-                        + " [" + summary + "]";
+                        + " [" + summary + "]"
+                        + (a0dStaticReady
+                        ? " A0d-branch=ready"
+                        : " A0d-branch=failed");
                 ModuleLog.line(TAG + writerScanStatus);
             } catch (Throwable t) {
                 writerScanStatus = "failed " + error(t);
@@ -1137,6 +1179,360 @@ public final class PfpClickDiagnostics {
 
         worker.setDaemon(true);
         worker.start();
+    }
+
+    private static void installA0dBranchDiagnostics(
+            DexKitBridge bridge,
+            ClassLoader loader
+    ) {
+        try {
+            Class<?> fragmentClass = Class.forName(
+                    "com.instagram.profile.fragment.UserDetailFragment",
+                    false,
+                    loader
+            );
+
+            Method a0d = null;
+            for (Method method : fragmentClass.getDeclaredMethods()) {
+                if (!"A0d".equals(method.getName())) continue;
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length == 2 && params[1] == boolean.class) {
+                    method.setAccessible(true);
+                    a0d = method;
+                    break;
+                }
+            }
+
+            if (a0d == null) return;
+
+            Object methodData = bridge.getMethodData(a0d);
+            if (methodData == null) return;
+
+            A0D_READ_FIELDS.clear();
+
+            try {
+                Method getUsingFields =
+                        methodData.getClass().getMethod("getUsingFields");
+                Object value = getUsingFields.invoke(methodData);
+
+                if (value instanceof Iterable) {
+                    for (Object usingField : (Iterable<?>) value) {
+                        if (usingField == null) continue;
+
+                        Object usingType = invokeNoArg(
+                                usingField,
+                                "getUsingType"
+                        );
+                        if (usingType == null
+                                || !"Read".equals(String.valueOf(usingType))) {
+                            continue;
+                        }
+
+                        Object fieldData = invokeNoArg(
+                                usingField,
+                                "getField"
+                        );
+                        if (fieldData == null) continue;
+
+                        try {
+                            Method getFieldInstance =
+                                    fieldData.getClass().getMethod(
+                                            "getFieldInstance",
+                                            ClassLoader.class
+                                    );
+                            Object reflected =
+                                    getFieldInstance.invoke(fieldData, loader);
+                            if (reflected instanceof Field) {
+                                Field field = (Field) reflected;
+                                field.setAccessible(true);
+                                A0D_READ_FIELDS.add(field);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            } catch (Throwable t) {
+                ModuleLog.line(
+                        TAG + "A0d read-field analysis failed: " + error(t)
+                );
+            }
+
+            int invokeHooks = 0;
+
+            try {
+                Method getInvokes =
+                        methodData.getClass().getMethod("getInvokes");
+                Object value = getInvokes.invoke(methodData);
+
+                if (value instanceof Iterable) {
+                    for (Object invokeData : (Iterable<?>) value) {
+                        if (invokeData == null || invokeHooks >= 40) break;
+
+                        try {
+                            Method getMethodInstance =
+                                    invokeData.getClass().getMethod(
+                                            "getMethodInstance",
+                                            ClassLoader.class
+                                    );
+                            Object reflected =
+                                    getMethodInstance.invoke(invokeData, loader);
+                            if (!(reflected instanceof Method)) continue;
+
+                            Method invoked = (Method) reflected;
+                            String owner =
+                                    invoked.getDeclaringClass().getName();
+
+                            if (!(owner.startsWith("X.")
+                                    || owner.startsWith("com.instagram."))) {
+                                continue;
+                            }
+
+                            Class<?> returnType = invoked.getReturnType();
+                            if (!(returnType.isPrimitive()
+                                    || returnType.isEnum()
+                                    || returnType == String.class)) {
+                                continue;
+                            }
+
+                            String key = owner + "#" + signature(invoked);
+                            if (!HOOKED_A0D_INVOKES.add(key)) continue;
+
+                            invoked.setAccessible(true);
+                            hookA0dInvoke(invoked);
+                            invokeHooks++;
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            } catch (Throwable t) {
+                ModuleLog.line(
+                        TAG + "A0d invoke analysis failed: " + error(t)
+                );
+            }
+
+            a0dStaticReady = true;
+            ModuleLog.line(
+                    TAG + "A0d branch tracer ready fields="
+                            + A0D_READ_FIELDS.size()
+                            + " invokes=" + invokeHooks
+            );
+        } catch (Throwable t) {
+            ModuleLog.line(
+                    TAG + "A0d branch tracer failed: " + error(t)
+            );
+        }
+    }
+
+    private static Object invokeNoArg(Object target, String methodName) {
+        if (target == null) return null;
+
+        try {
+            Method method = target.getClass().getMethod(methodName);
+            method.setAccessible(true);
+            return method.invoke(target);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void hookA0dInvoke(Method invoked) {
+        XposedBridge.hookMethod(invoked, new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                Object duo = A0D_BRANCH_DUO.get();
+                if (duo == null) return;
+
+                appendA0dBranchHistory(
+                        duo,
+                        "  INVOKE "
+                                + invoked.getDeclaringClass().getName()
+                                + "." + signature(invoked)
+                                + " -> " + compactValue(param.getResult())
+                                + " threw="
+                                + (param.hasThrowable()
+                                ? error(param.getThrowable())
+                                : "none")
+                );
+            }
+        });
+    }
+
+    private static String a0dReadSnapshot(
+            Object fragment,
+            Object[] args
+    ) {
+        if (!a0dStaticReady || A0D_READ_FIELDS.isEmpty()) {
+            return "<static read map not ready>";
+        }
+
+        StringBuilder out = new StringBuilder();
+        int shown = 0;
+
+        synchronized (A0D_READ_FIELDS) {
+            for (Field field : A0D_READ_FIELDS) {
+                if (shown >= 48) {
+                    out.append(" | …");
+                    break;
+                }
+
+                Object owner = resolveFieldOwner(
+                        field,
+                        fragment,
+                        args
+                );
+                Object value = null;
+                boolean readable = false;
+
+                try {
+                    if (Modifier.isStatic(field.getModifiers())) {
+                        value = field.get(null);
+                        readable = true;
+                    } else if (owner != null) {
+                        value = field.get(owner);
+                        readable = true;
+                    }
+                } catch (Throwable ignored) {}
+
+                if (out.length() > 0) out.append(" | ");
+
+                out.append(field.getDeclaringClass().getSimpleName())
+                        .append('.')
+                        .append(field.getName())
+                        .append('=')
+                        .append(readable
+                                ? snapshotValue(value)
+                                : "<owner?>");
+                shown++;
+            }
+        }
+
+        return out.length() == 0 ? "<no direct field reads>" : out.toString();
+    }
+
+    private static Object resolveFieldOwner(
+            Field field,
+            Object fragment,
+            Object[] args
+    ) {
+        if (field == null) return null;
+
+        Class<?> ownerType = field.getDeclaringClass();
+
+        if (fragment != null && ownerType.isInstance(fragment)) {
+            return fragment;
+        }
+
+        if (args != null) {
+            for (Object arg : args) {
+                if (arg != null && ownerType.isInstance(arg)) {
+                    return arg;
+                }
+            }
+        }
+
+        Object found = findDirectObjectOfType(fragment, ownerType);
+        if (found != null) return found;
+
+        if (args != null) {
+            for (Object arg : args) {
+                found = findDirectObjectOfType(arg, ownerType);
+                if (found != null) return found;
+            }
+        }
+
+        Object duo = readUserDetailDuo(fragment);
+        if (duo != null) {
+            if (ownerType.isInstance(duo)) return duo;
+            found = findDirectObjectOfType(duo, ownerType);
+            if (found != null) return found;
+        }
+
+        return null;
+    }
+
+    private static Object findDirectObjectOfType(
+            Object object,
+            Class<?> wantedType
+    ) {
+        if (object == null || wantedType == null) return null;
+
+        Class<?> cls = object.getClass();
+        int checked = 0;
+
+        while (cls != null && cls != Object.class && checked < 160) {
+            Field[] fields;
+
+            try {
+                fields = cls.getDeclaredFields();
+            } catch (Throwable t) {
+                break;
+            }
+
+            for (Field field : fields) {
+                if (checked++ >= 160) break;
+                if (Modifier.isStatic(field.getModifiers())) continue;
+
+                try {
+                    field.setAccessible(true);
+                    Object value = field.get(object);
+                    if (value != null && wantedType.isInstance(value)) {
+                        return value;
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            cls = cls.getSuperclass();
+        }
+
+        return null;
+    }
+
+    private static boolean calledFromUserDetailMethod(String methodName) {
+        if (methodName == null) return false;
+
+        try {
+            for (StackTraceElement frame
+                    : Thread.currentThread().getStackTrace()) {
+                if ("com.instagram.profile.fragment.UserDetailFragment"
+                        .equals(frame.getClassName())
+                        && methodName.equals(frame.getMethodName())) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        return false;
+    }
+
+    private static void appendA0dBranchHistory(
+            Object duo,
+            String line
+    ) {
+        if (duo == null || line == null || line.isEmpty()) return;
+
+        synchronized (A0D_BRANCH_HISTORY) {
+            StringBuilder history = A0D_BRANCH_HISTORY.get(duo);
+            if (history == null) {
+                history = new StringBuilder();
+                A0D_BRANCH_HISTORY.put(duo, history);
+            }
+
+            if (history.length() > 0) history.append('\n');
+            history.append(line);
+
+            if (history.length() > 7600) {
+                history.delete(0, history.length() - 6600);
+            }
+        }
+    }
+
+    private static String a0dBranchHistory(Object duo) {
+        if (duo == null) return "<null DUO>";
+
+        synchronized (A0D_BRANCH_HISTORY) {
+            StringBuilder history = A0D_BRANCH_HISTORY.get(duo);
+            return history == null || history.length() == 0
+                    ? "<no A16 A0d branch trace>"
+                    : history.toString();
+        }
     }
 
     private static void hookDuoWriter(
