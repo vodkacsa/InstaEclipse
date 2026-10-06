@@ -1048,7 +1048,7 @@ public final class PfpClickDiagnostics {
                                 FindMethod.create().matcher(
                                         MethodMatcher.create().addUsingField(
                                                 descriptor,
-                                                UsingType.Set
+                                                UsingType.Put
                                         )
                                 )
                         )) {
