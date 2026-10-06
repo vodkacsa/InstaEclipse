@@ -174,7 +174,7 @@ public final class PfpClickDiagnostics {
 
                             if (action == MotionEvent.ACTION_UP
                                     || action == MotionEvent.ACTION_CANCEL) {
-                                finishCapture((Activity) param.thisObject);
+                                scheduleFinish((Activity) param.thisObject);
                             }
                         }
                     }
@@ -297,6 +297,25 @@ public final class PfpClickDiagnostics {
                 + "," + Math.round(event.getRawY()));
 
         logTargetListeners(target);
+    }
+
+    private static void scheduleFinish(Activity activity) {
+        Integer capture = ACTIVE_CAPTURE.get();
+        if (capture == null || activity == null) return;
+
+        View root = activity.findViewById(android.R.id.content);
+
+        if (root == null) {
+            finishCapture(activity);
+            return;
+        }
+
+        root.postDelayed(() -> {
+            Integer active = ACTIVE_CAPTURE.get();
+            if (active != null && active.equals(capture)) {
+                finishCapture(activity);
+            }
+        }, 500);
     }
 
     private static void finishCapture(Activity activity) {
