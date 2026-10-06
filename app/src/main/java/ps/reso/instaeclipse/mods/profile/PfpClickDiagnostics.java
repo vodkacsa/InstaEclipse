@@ -69,6 +69,8 @@ public final class PfpClickDiagnostics {
             new ThreadLocal<>();
     private static final ThreadLocal<Boolean> A0D_DUO_READY_BEFORE =
             new ThreadLocal<>();
+    private static final ThreadLocal<Boolean> RECOVERY_ACTIVE =
+            ThreadLocal.withInitial(() -> false);
 
     private static final Object BUFFER_LOCK = new Object();
     private static final StringBuilder BUFFER = new StringBuilder();
@@ -96,10 +98,13 @@ public final class PfpClickDiagnostics {
             new WeakHashMap<>();
     private static final WeakHashMap<Object, Map<String, String>> LAST_A0D_FRAGMENT_STATE =
             new WeakHashMap<>();
+    private static final WeakHashMap<Object, Object> LAST_A0D_MODEL =
+            new WeakHashMap<>();
 
     private static volatile Map<String, String> SUCCESS_A0D_FRAGMENT_STATE;
     private static volatile boolean installed;
     private static volatile Field userDetailDuoField;
+    private static volatile Method userDetailA0dMethod;
 
     private PfpClickDiagnostics() {}
 
@@ -465,6 +470,7 @@ public final class PfpClickDiagnostics {
                             if (readNamedField(param.thisObject, "A01") == null) {
                                 diag("A0d success-state diff:\n"
                                         + failedA0dDiff(param.thisObject));
+                                tryA1dRecovery(param.thisObject);
                             }
                         }
                     }
@@ -833,12 +839,26 @@ public final class PfpClickDiagnostics {
                 method.setAccessible(true);
                 String key = "UserDetail." + signature(method);
 
+                if ("A0d".equals(method.getName())
+                        && method.getParameterTypes().length == 2) {
+                    userDetailA0dMethod = method;
+                }
+
                 XposedBridge.hookMethod(method, new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
                         Object duo = readUserDetailDuo(param.thisObject);
                         if (duo != null) {
                             if ("A0d".equals(method.getName())) {
+                                if (param.args.length > 0 && param.args[0] != null) {
+                                    synchronized (LAST_A0D_MODEL) {
+                                        LAST_A0D_MODEL.put(
+                                                param.thisObject,
+                                                param.args[0]
+                                        );
+                                    }
+                                }
+
                                 Map<String, String> beforeState =
                                         fragmentStateSnapshot(param.thisObject);
                                 A0D_BEFORE_FRAGMENT_STATE.set(beforeState);
@@ -952,6 +972,90 @@ public final class PfpClickDiagnostics {
                 });
             } catch (Throwable ignored) {}
         }
+    }
+
+    private static void tryA1dRecovery(Object duo) {
+        if (duo == null || Boolean.TRUE.equals(RECOVERY_ACTIVE.get())) return;
+        if (readNamedField(duo, "A01") != null) return;
+
+        Object fragment = readNamedField(duo, "A06");
+        if (fragment == null) {
+            diag("A1D recovery: no UserDetailFragment");
+            return;
+        }
+
+        Object a1d = readNamedField(fragment, "A1D");
+        if (!Boolean.TRUE.equals(a1d)) {
+            diag("A1D recovery: skipped, A1D=" + compactValue(a1d));
+            return;
+        }
+
+        Method a0d = userDetailA0dMethod;
+        Object model;
+
+        synchronized (LAST_A0D_MODEL) {
+            model = LAST_A0D_MODEL.get(fragment);
+        }
+
+        if (a0d == null || model == null) {
+            diag("A1D recovery: missing "
+                    + (a0d == null ? "A0d method" : "last EML model"));
+            return;
+        }
+
+        RECOVERY_ACTIVE.set(true);
+
+        try {
+            diag("A1D recovery: forcing true→false for one A0d(false) call");
+            if (!writeNamedField(fragment, "A1D", false)) {
+                diag("A1D recovery: failed to write A1D");
+                return;
+            }
+
+            a0d.invoke(fragment, model, false);
+
+            boolean ready = readNamedField(duo, "A01") != null;
+            diag("A1D recovery result: "
+                    + (ready ? "DUO READY ✅" : "still null ❌")
+                    + " state=" + duoTrackedState(duo));
+        } catch (Throwable t) {
+            Throwable cause = t.getCause() != null ? t.getCause() : t;
+            diag("A1D recovery threw=" + error(cause));
+        } finally {
+            writeNamedField(fragment, "A1D", true);
+            RECOVERY_ACTIVE.remove();
+        }
+    }
+
+    private static boolean writeNamedField(
+            Object object,
+            String name,
+            Object value
+    ) {
+        if (object == null || name == null) return false;
+
+        Class<?> cls = object.getClass();
+
+        while (cls != null && cls != Object.class) {
+            try {
+                Field field = cls.getDeclaredField(name);
+                field.setAccessible(true);
+
+                if (field.getType() == boolean.class && value instanceof Boolean) {
+                    field.setBoolean(object, (Boolean) value);
+                } else {
+                    field.set(object, value);
+                }
+
+                return true;
+            } catch (NoSuchFieldException ignored) {
+                cls = cls.getSuperclass();
+            } catch (Throwable ignored) {
+                return false;
+            }
+        }
+
+        return false;
     }
 
     private static Object readNamedField(Object object, String name) {
