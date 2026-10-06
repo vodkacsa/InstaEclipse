@@ -83,6 +83,8 @@ public final class PfpClickDiagnostics {
             Collections.synchronizedSet(new HashSet<>());
     private static final Set<String> HOOKED_TARGET_LISTENER_METHODS =
             Collections.synchronizedSet(new HashSet<>());
+    private static final Set<Class<?>> HOOKED_GATE_OBJECT_CLASSES =
+            Collections.synchronizedSet(new HashSet<>());
 
     private static final WeakHashMap<Activity, View> NORMAL_TARGETS =
             new WeakHashMap<>();
@@ -99,6 +101,8 @@ public final class PfpClickDiagnostics {
     private static final WeakHashMap<Object, String> FRAGMENT_GATE_LAST =
             new WeakHashMap<>();
     private static final WeakHashMap<Object, StringBuilder> FRAGMENT_GATE_HISTORY =
+            new WeakHashMap<>();
+    private static final WeakHashMap<Object, Object> GATE_OBJECT_OWNERS =
             new WeakHashMap<>();
 
     private static volatile Map<String, String> SUCCESS_A0D_FRAGMENT_STATE;
@@ -1027,6 +1031,9 @@ public final class PfpClickDiagnostics {
     ) {
         if (fragment == null) return;
 
+        trackGateObject(fragment, readNamedField(fragment, "A0z"));
+        trackGateObject(fragment, readNamedField(fragment, "A1j"));
+
         String state = fragmentGateState(fragment);
 
         synchronized (FRAGMENT_GATE_LAST) {
@@ -1046,6 +1053,85 @@ public final class PfpClickDiagnostics {
 
             if (history.length() > 3600) {
                 history.delete(0, history.length() - 3000);
+            }
+        }
+    }
+
+    private static void trackGateObject(Object fragment, Object gateObject) {
+        if (fragment == null || gateObject == null) return;
+
+        synchronized (GATE_OBJECT_OWNERS) {
+            GATE_OBJECT_OWNERS.put(gateObject, fragment);
+        }
+
+        hookGateObjectClass(gateObject.getClass());
+    }
+
+    private static void hookGateObjectClass(Class<?> cls) {
+        if (cls == null || !HOOKED_GATE_OBJECT_CLASSES.add(cls)) return;
+
+        for (Method method : cls.getDeclaredMethods()) {
+            try {
+                method.setAccessible(true);
+                String key = cls.getName() + "." + signature(method);
+
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        recordGateObjectMutation(
+                                param.thisObject,
+                                "before " + key
+                        );
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        recordGateObjectMutation(
+                                param.thisObject,
+                                "after " + key
+                                        + " args=" + argsSummary(param.args, 6)
+                                        + "\ncallers: " + compactCallStack()
+                        );
+                    }
+                });
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private static void recordGateObjectMutation(
+            Object gateObject,
+            String where
+    ) {
+        if (gateObject == null) return;
+
+        Object fragment;
+        synchronized (GATE_OBJECT_OWNERS) {
+            fragment = GATE_OBJECT_OWNERS.get(gateObject);
+        }
+        if (fragment == null) return;
+
+        String state = fragmentGateState(fragment);
+
+        synchronized (FRAGMENT_GATE_LAST) {
+            String previous = FRAGMENT_GATE_LAST.get(fragment);
+            if (state.equals(previous)) return;
+
+            FRAGMENT_GATE_LAST.put(fragment, state);
+
+            StringBuilder history = FRAGMENT_GATE_HISTORY.get(fragment);
+            if (history == null) {
+                history = new StringBuilder();
+                FRAGMENT_GATE_HISTORY.put(fragment, history);
+            }
+
+            if (history.length() > 0) history.append('\n');
+            history.append("GATE MUTATION ")
+                    .append(where)
+                    .append(" -> ")
+                    .append(state);
+
+            if (history.length() > 6200) {
+                history.delete(0, history.length() - 5200);
             }
         }
     }
