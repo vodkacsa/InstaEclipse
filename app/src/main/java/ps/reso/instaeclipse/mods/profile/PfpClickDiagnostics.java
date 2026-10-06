@@ -24,6 +24,8 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -62,6 +64,10 @@ public final class PfpClickDiagnostics {
     private static final ThreadLocal<Activity> ACTIVE_ACTIVITY = new ThreadLocal<>();
     private static final ThreadLocal<Boolean> OPENED =
             ThreadLocal.withInitial(() -> false);
+    private static final ThreadLocal<Map<String, String>> A0D_BEFORE_FRAGMENT_STATE =
+            new ThreadLocal<>();
+    private static final ThreadLocal<Boolean> A0D_DUO_READY_BEFORE =
+            new ThreadLocal<>();
 
     private static final Object BUFFER_LOCK = new Object();
     private static final StringBuilder BUFFER = new StringBuilder();
@@ -85,7 +91,10 @@ public final class PfpClickDiagnostics {
             new WeakHashMap<>();
     private static final WeakHashMap<Object, StringBuilder> DUO_HISTORY =
             new WeakHashMap<>();
+    private static final WeakHashMap<Object, Map<String, String>> LAST_A0D_FRAGMENT_STATE =
+            new WeakHashMap<>();
 
+    private static volatile Map<String, String> SUCCESS_A0D_FRAGMENT_STATE;
     private static volatile boolean installed;
     private static volatile Field userDetailDuoField;
 
@@ -427,6 +436,10 @@ public final class PfpClickDiagnostics {
                                     + fieldSummary(param.thisObject, 12));
                             diag("DUO init history:\n"
                                     + duoHistory(param.thisObject));
+                            if (readNamedField(param.thisObject, "A01") == null) {
+                                diag("A0d success-state diff:\n"
+                                        + failedA0dDiff(param.thisObject));
+                            }
                         }
                     }
 
@@ -682,6 +695,16 @@ public final class PfpClickDiagnostics {
                         Object duo = readUserDetailDuo(param.thisObject);
                         if (duo != null) {
                             if ("A0d".equals(method.getName())) {
+                                Map<String, String> beforeState =
+                                        fragmentStateSnapshot(param.thisObject);
+                                A0D_BEFORE_FRAGMENT_STATE.set(beforeState);
+                                A0D_DUO_READY_BEFORE.set(
+                                        readNamedField(duo, "A01") != null
+                                );
+                                synchronized (LAST_A0D_FRAGMENT_STATE) {
+                                    LAST_A0D_FRAGMENT_STATE.put(duo, beforeState);
+                                }
+
                                 appendDuoHistory(
                                         duo,
                                         "CALL " + key
@@ -697,6 +720,27 @@ public final class PfpClickDiagnostics {
                     protected void afterHookedMethod(MethodHookParam param) {
                         Object duo = readUserDetailDuo(param.thisObject);
                         if (duo != null) {
+                            if ("A0d".equals(method.getName())) {
+                                Map<String, String> beforeState =
+                                        A0D_BEFORE_FRAGMENT_STATE.get();
+                                boolean readyBefore =
+                                        Boolean.TRUE.equals(A0D_DUO_READY_BEFORE.get());
+                                boolean readyAfter =
+                                        readNamedField(duo, "A01") != null;
+
+                                if (!readyBefore && readyAfter && beforeState != null) {
+                                    SUCCESS_A0D_FRAGMENT_STATE =
+                                            new LinkedHashMap<>(beforeState);
+                                    appendDuoHistory(
+                                            duo,
+                                            "A0d SUCCESS baseline learned"
+                                    );
+                                }
+
+                                A0D_BEFORE_FRAGMENT_STATE.remove();
+                                A0D_DUO_READY_BEFORE.remove();
+                            }
+
                             recordDuoState(duo, "after " + key);
                         }
                     }
@@ -764,6 +808,133 @@ public final class PfpClickDiagnostics {
                 });
             } catch (Throwable ignored) {}
         }
+    }
+
+    private static Object readNamedField(Object object, String name) {
+        if (object == null || name == null) return null;
+
+        Class<?> cls = object.getClass();
+        while (cls != null && cls != Object.class) {
+            try {
+                Field field = cls.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(object);
+            } catch (NoSuchFieldException ignored) {
+                cls = cls.getSuperclass();
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private static Map<String, String> fragmentStateSnapshot(Object fragment) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (fragment == null) return out;
+
+        Class<?> cls = fragment.getClass();
+        int added = 0;
+
+        while (cls != null && cls != Object.class && added < 220) {
+            Field[] fields;
+            try {
+                fields = cls.getDeclaredFields();
+            } catch (Throwable t) {
+                break;
+            }
+
+            for (Field field : fields) {
+                if (added >= 220) break;
+                if (Modifier.isStatic(field.getModifiers())) continue;
+
+                try {
+                    field.setAccessible(true);
+                    Object value = field.get(fragment);
+                    out.put(
+                            cls.getSimpleName() + "." + field.getName(),
+                            snapshotValue(value)
+                    );
+                    added++;
+                } catch (Throwable ignored) {}
+            }
+
+            cls = cls.getSuperclass();
+        }
+
+        return out;
+    }
+
+    private static String snapshotValue(Object value) {
+        if (value == null) return "null";
+
+        if (value instanceof String) {
+            String text = (String) value;
+            if (text.length() > 80) text = text.substring(0, 80) + "…";
+            return "\"" + text + "\"";
+        }
+
+        if (value instanceof Boolean
+                || value instanceof Number
+                || value instanceof Character
+                || value.getClass().isEnum()) {
+            return String.valueOf(value);
+        }
+
+        if (value instanceof View) {
+            return shortView((View) value);
+        }
+
+        return value.getClass().getSimpleName()
+                + "{" + fieldSummary(value, 4) + "}";
+    }
+
+    private static String failedA0dDiff(Object duo) {
+        Map<String, String> success = SUCCESS_A0D_FRAGMENT_STATE;
+        if (success == null) {
+            return "<no successful baseline yet; open a working profile first>";
+        }
+
+        Map<String, String> failed;
+        synchronized (LAST_A0D_FRAGMENT_STATE) {
+            failed = LAST_A0D_FRAGMENT_STATE.get(duo);
+            if (failed != null) {
+                failed = new LinkedHashMap<>(failed);
+            }
+        }
+
+        if (failed == null) {
+            return "<no A0d fragment snapshot for this DUO>";
+        }
+
+        StringBuilder out = new StringBuilder();
+        int shown = 0;
+
+        for (Map.Entry<String, String> entry : success.entrySet()) {
+            String key = entry.getKey();
+            String good = entry.getValue();
+            String bad = failed.get(key);
+
+            if (bad == null && !failed.containsKey(key)) continue;
+            if (good == null ? bad == null : good.equals(bad)) continue;
+
+            if (shown > 0) out.append('\n');
+            out.append(key)
+                    .append(": good=")
+                    .append(good)
+                    .append(" | bad=")
+                    .append(bad);
+
+            shown++;
+            if (shown >= 36) {
+                out.append("\n… diff truncated");
+                break;
+            }
+        }
+
+        return shown == 0
+                ? "<no differing captured fragment fields>"
+                : out.toString();
     }
 
     private static void appendDuoHistory(Object duo, String line) {
