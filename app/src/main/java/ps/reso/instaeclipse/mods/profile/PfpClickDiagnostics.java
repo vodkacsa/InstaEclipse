@@ -102,8 +102,6 @@ public final class PfpClickDiagnostics {
             new WeakHashMap<>();
     private static final WeakHashMap<Object, StringBuilder> FRAGMENT_GATE_HISTORY =
             new WeakHashMap<>();
-    private static final WeakHashMap<Object, StringBuilder> MEDIA_INIT_HISTORY =
-            new WeakHashMap<>();
     private static final WeakHashMap<Object, Object> GATE_OBJECT_OWNERS =
             new WeakHashMap<>();
 
@@ -475,8 +473,6 @@ public final class PfpClickDiagnostics {
                             Object fragment = readNamedField(param.thisObject, "A06");
                             diag("Profile gate history:\n"
                                     + fragmentGateHistory(fragment));
-                            diag("Media init history:\n"
-                                    + mediaInitHistory(fragment));
                             if (readNamedField(param.thisObject, "A01") == null) {
                                 diag("A0d success-state diff:\n"
                                         + failedA0dDiff(param.thisObject));
@@ -866,16 +862,6 @@ public final class PfpClickDiagnostics {
                             );
                         }
 
-                        if (isMediaInitMethod(method.getName())) {
-                            appendMediaInitHistory(
-                                    param.thisObject,
-                                    "CALL " + key
-                                            + " args=" + detailedArgsSummary(param.args)
-                                            + "\nstate=" + fragmentGateState(param.thisObject)
-                                            + "\ncallers: " + compactCallStack()
-                            );
-                        }
-
                         Object duo = readUserDetailDuo(param.thisObject);
                         if (duo != null) {
                             if ("A0d".equals(method.getName())) {
@@ -944,19 +930,6 @@ public final class PfpClickDiagnostics {
                                             : "none")
                             );
                         }
-
-                        if (isMediaInitMethod(method.getName())) {
-                            appendMediaInitHistory(
-                                    param.thisObject,
-                                    "RETURN " + key
-                                            + " result=" + compactValue(param.getResult())
-                                            + " threw="
-                                            + (param.hasThrowable()
-                                            ? error(param.getThrowable())
-                                            : "none")
-                                            + "\nstate=" + fragmentGateState(param.thisObject)
-                            );
-                        }
                     }
                 });
             } catch (Throwable ignored) {}
@@ -1022,72 +995,6 @@ public final class PfpClickDiagnostics {
                 });
             } catch (Throwable ignored) {}
         }
-    }
-
-    private static boolean isMediaInitMethod(String name) {
-        return "FZW".equals(name)
-                || "FZ8".equals(name);
-    }
-
-    private static void appendMediaInitHistory(
-            Object fragment,
-            String line
-    ) {
-        if (fragment == null || line == null || line.isEmpty()) return;
-
-        synchronized (MEDIA_INIT_HISTORY) {
-            StringBuilder history = MEDIA_INIT_HISTORY.get(fragment);
-            if (history == null) {
-                history = new StringBuilder();
-                MEDIA_INIT_HISTORY.put(fragment, history);
-            }
-
-            if (history.length() > 0) history.append('\n');
-            history.append(line);
-
-            if (history.length() > 5200) {
-                history.delete(0, history.length() - 4400);
-            }
-        }
-    }
-
-    private static String mediaInitHistory(Object fragment) {
-        if (fragment == null) return "<null fragment>";
-
-        synchronized (MEDIA_INIT_HISTORY) {
-            StringBuilder history = MEDIA_INIT_HISTORY.get(fragment);
-            return history == null || history.length() == 0
-                    ? "<no FZW/FZ8 calls recorded>"
-                    : history.toString();
-        }
-    }
-
-    private static String detailedArgsSummary(Object[] args) {
-        if (args == null || args.length == 0) return "[]";
-
-        StringBuilder out = new StringBuilder("[");
-
-        for (int i = 0; i < args.length; i++) {
-            if (i > 0) out.append(", ");
-            Object value = args[i];
-            out.append(i).append('=');
-
-            if (value == null) {
-                out.append("null");
-            } else if (value instanceof Boolean
-                    || value instanceof Number
-                    || value instanceof Character
-                    || value.getClass().isEnum()) {
-                out.append(String.valueOf(value));
-            } else {
-                out.append(value.getClass().getName())
-                        .append('{')
-                        .append(fieldSummary(value, 16))
-                        .append('}');
-            }
-        }
-
-        return out.append(']').toString();
     }
 
     private static boolean isGateBranchMethod(String name) {
@@ -1230,16 +1137,10 @@ public final class PfpClickDiagnostics {
     }
 
     private static String fragmentGateState(Object fragment) {
-        Object a0n = readNamedField(fragment, "A0N");
-        Object a0c = readNamedField(fragment, "A0c");
-        Object a0d = readNamedField(fragment, "A0d");
         Object a0z = readNamedField(fragment, "A0z");
         Object a1j = readNamedField(fragment, "A1j");
 
-        return "A0N.A02=" + nestedFieldValue(a0n, "A02")
-                + " | A0c.A03=" + nestedFieldValue(a0c, "A03")
-                + " | A0d.A01=" + nestedFieldValue(a0d, "A01")
-                + " | A0z.A00=" + nestedFieldValue(a0z, "A00")
+        return "A0z.A00=" + nestedFieldValue(a0z, "A00")
                 + " | A0z.A01=" + nestedFieldValue(a0z, "A01")
                 + " | A1D=" + compactValue(readNamedField(fragment, "A1D"))
                 + " | A1j.A00=" + nestedFieldValue(a1j, "A00")
