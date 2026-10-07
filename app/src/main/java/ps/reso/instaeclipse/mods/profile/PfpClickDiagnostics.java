@@ -50,8 +50,11 @@ import ps.reso.instaeclipse.utils.log.ModuleLog;
  * short capture. Only the native PFP-open checkpoints relevant to this bug are
  * shown. The completed capture is also copied to the clipboard.
  *
- * Diagnostic only: this class does not alter arguments, click results or the
- * native profile-picture viewer path.
+ * Mostly diagnostic. It also contains one narrowly-scoped native repair:
+ * while UserDetailFragment.A0d runs from A0U/A16 with an uninitialized DUO,
+ * the X.116.A0U predicate is allowed to take the same true branch seen on
+ * working profiles. No click routing, CoinFlip state, or viewer callbacks are
+ * replaced.
  */
 public final class PfpClickDiagnostics {
 
@@ -914,11 +917,12 @@ public final class PfpClickDiagnostics {
                                                 + "\nA0d callers: " + compactCallStack()
                                 );
 
-                                if (calledFromUserDetailMethod("A16")) {
+                                String a0dCaller = currentA0dSetupCaller();
+                                if (a0dCaller != null) {
                                     A0D_BRANCH_DUO.set(duo);
                                     appendA0dBranchHistory(
                                             duo,
-                                            "A16 A0d START args="
+                                            a0dCaller + " A0d START args="
                                                     + argsSummary(param.args, 4)
                                                     + "\n  reads="
                                                     + a0dReadSnapshot(
@@ -956,7 +960,7 @@ public final class PfpClickDiagnostics {
                                 if (A0D_BRANCH_DUO.get() == duo) {
                                     appendA0dBranchHistory(
                                             duo,
-                                            "A16 A0d END ready=" + readyAfter
+                                            "A0d END ready=" + readyAfter
                                                     + "\n  reads="
                                                     + a0dReadSnapshot(
                                                             param.thisObject,
@@ -1340,12 +1344,33 @@ public final class PfpClickDiagnostics {
                 Object duo = A0D_BRANCH_DUO.get();
                 if (duo == null) return;
 
+                Object originalResult = param.getResult();
+                boolean repaired = false;
+
+                // This is the first predicate we have observed that perfectly
+                // separates the working and broken native viewer setup:
+                // working A0d => true, broken A0d => false. Only override it
+                // while A0d is being called from the normal A0U/A16 setup path
+                // and this DUO has not been initialized yet.
+                if (isNativeViewerSetupPredicate(invoked)
+                        && Boolean.FALSE.equals(originalResult)
+                        && readNamedField(duo, "A01") == null
+                        && readNamedField(duo, "A02") == null
+                        && readNamedField(duo, "A05") == null) {
+                    param.setResult(Boolean.TRUE);
+                    repaired = true;
+                }
+
                 appendA0dBranchHistory(
                         duo,
                         "  INVOKE "
                                 + invoked.getDeclaringClass().getName()
                                 + "." + signature(invoked)
+                                + " args=" + argsSummary(param.args, 6)
                                 + " -> " + compactValue(param.getResult())
+                                + (repaired
+                                ? " [REPAIR false→true]"
+                                : "")
                                 + " threw="
                                 + (param.hasThrowable()
                                 ? error(param.getThrowable())
@@ -1353,6 +1378,19 @@ public final class PfpClickDiagnostics {
                 );
             }
         });
+    }
+
+    private static boolean isNativeViewerSetupPredicate(Method method) {
+        if (method == null) return false;
+
+        Class<?>[] params = method.getParameterTypes();
+
+        return "X.116".equals(method.getDeclaringClass().getName())
+                && "A0U".equals(method.getName())
+                && method.getReturnType() == boolean.class
+                && params.length == 3
+                && params[1] == int.class
+                && params[2] == boolean.class;
     }
 
     private static String a0dReadSnapshot(
@@ -1485,21 +1523,23 @@ public final class PfpClickDiagnostics {
         return null;
     }
 
-    private static boolean calledFromUserDetailMethod(String methodName) {
-        if (methodName == null) return false;
-
+    private static String currentA0dSetupCaller() {
         try {
             for (StackTraceElement frame
                     : Thread.currentThread().getStackTrace()) {
-                if ("com.instagram.profile.fragment.UserDetailFragment"
-                        .equals(frame.getClassName())
-                        && methodName.equals(frame.getMethodName())) {
-                    return true;
+                if (!"com.instagram.profile.fragment.UserDetailFragment"
+                        .equals(frame.getClassName())) {
+                    continue;
+                }
+
+                String method = frame.getMethodName();
+                if ("A0U".equals(method) || "A16".equals(method)) {
+                    return method;
                 }
             }
         } catch (Throwable ignored) {}
 
-        return false;
+        return null;
     }
 
     private static void appendA0dBranchHistory(
