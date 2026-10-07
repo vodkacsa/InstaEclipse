@@ -452,6 +452,11 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         ModuleLog.line("(InstaEclipse | ReelDownload): ❌ Failed to hook");
                     }
 
+                    // Native expanded-profile-picture viewer repair
+                    try {
+                        ps.reso.instaeclipse.mods.profile.PfpViewerRepair.install(lpparam.classLoader);
+                    } catch (Throwable ignored) {}
+
                     // Expanded profile picture renderer bypass
                     try {
                         ps.reso.instaeclipse.mods.profile.PfpRendererBypass.install();

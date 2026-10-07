@@ -20,7 +20,6 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import ps.reso.instaeclipse.R;
-import ps.reso.instaeclipse.mods.profile.PfpClickDiagnostics;
 import ps.reso.instaeclipse.mods.profile.PfpRendererBypass;
 import ps.reso.instaeclipse.utils.feature.FeatureFlags;
 import ps.reso.instaeclipse.utils.feature.FeatureStatusTracker;
@@ -61,17 +60,10 @@ public class ProfilePicDownloadHook {
             protected void afterHookedMethod(MethodHookParam param) {
                 View v = (View) param.thisObject;
 
-                // Temporary PR-only diagnostics for the profile-page picture.
-                // This runs before the expanded_profile_pic filter so it also
-                // sees accounts whose profile picture cannot be opened.
-                PfpClickDiagnostics.observeAttached(v);
-
                 int vid = v.getId();
                 if (vid == View.NO_ID) return;
 
                 // Fast path: cached int comparison (only resolves resource name once).
-                // Run diagnostics as soon as the exact stable target is identified,
-                // regardless of whether profile-picture downloading is enabled.
                 if (expandedPicViewId != 0) {
                     if (vid != expandedPicViewId) return;
                 } else {
