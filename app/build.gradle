@@ -14,8 +14,8 @@ android {
         // version so APKs published from Actions can be installed as updates.
         def ciVersionCode = System.getenv("CI_VERSION_CODE")
         def ciVersionName = System.getenv("CI_VERSION_NAME")
-        versionCode ciVersionCode != null ? Integer.parseInt(ciVersionCode) : 17
-        versionName ciVersionName != null ? ciVersionName : '0.7.0'
+        versionCode ciVersionCode != null ? Integer.parseInt(ciVersionCode) : 18
+        versionName ciVersionName != null ? ciVersionName : '0.8.0'
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: |
           echo "CI_VERSION_CODE=$((10000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
-          echo "CI_VERSION_NAME=0.7.0-build.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "CI_VERSION_NAME=0.8.0-build.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
 
       - name: Check signing configuration
         id: signing
