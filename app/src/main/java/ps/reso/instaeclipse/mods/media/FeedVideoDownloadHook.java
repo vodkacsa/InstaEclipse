@@ -1722,8 +1722,10 @@ public class FeedVideoDownloadHook {
                     if (cachedGetter != null) {
                         UserUtils.userUsernameGetter = cachedGetter;
                     }
-                    resolveDictUserGetter(bridge, classLoader);
+                    // Modern IG stores author access directly on Media, without the
+                    // legacy dict getter. Only resolve the older fallback if necessary.
                     resolveMediaAuthorGetter(bridge, classLoader);
+                    if (mediaAuthorGetter == null) resolveDictUserGetter(bridge, classLoader);
                     return;
                 } catch (Throwable ignored) {}
             }
@@ -1792,8 +1794,8 @@ public class FeedVideoDownloadHook {
                 ModuleLog.line("(IE|DL|Username) ❌ userUsernameGetter resolution: " + t);
             }
 
-            resolveDictUserGetter(bridge, classLoader);
             resolveMediaAuthorGetter(bridge, classLoader);
+            if (mediaAuthorGetter == null) resolveDictUserGetter(bridge, classLoader);
 
         } catch (Throwable t) {
             ModuleLog.line("(IE|DL|Username) ❌ resolveUsernameGetter: " + t);
