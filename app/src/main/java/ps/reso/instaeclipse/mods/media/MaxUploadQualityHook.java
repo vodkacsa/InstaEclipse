@@ -5,7 +5,9 @@ import org.luckypray.dexkit.query.FindMethod;
 import org.luckypray.dexkit.query.matchers.MethodMatcher;
 import org.luckypray.dexkit.result.MethodData;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.lang.reflect.Method;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -40,6 +42,29 @@ public class MaxUploadQualityHook {
                             .usingEqStrings(List.of(PREF_KEY))
                             .returnType("boolean")
                             .paramCount(1)));
+
+            if (results.isEmpty()) {
+                // The preference reader's argument count changed on some IG versions.
+                // Discover by the same exact key and only use an unambiguous boolean
+                // getter. Never hook unrelated preference accessors.
+                List<MethodData> matches = new ArrayList<>();
+                List<MethodData> candidates = bridge.findMethod(FindMethod.create()
+                        .matcher(MethodMatcher.create().usingEqStrings(List.of(PREF_KEY))));
+                for (MethodData md : candidates) {
+                    try {
+                        Method m = md.getMethodInstance(classLoader);
+                        if (m.getReturnType() == boolean.class && m.getParameterCount() <= 2)
+                            matches.add(md);
+                    } catch (Throwable ignored) {}
+                }
+                if (matches.size() == 1) {
+                    results = matches;
+                    ModuleLog.line(TAG + "using compatible boolean preference accessor");
+                } else {
+                    ModuleLog.line(TAG + "preference-key candidates=" + candidates.size()
+                            + ", compatible boolean accessors=" + matches.size());
+                }
+            }
 
             int n = 0;
             for (MethodData md : results) {

@@ -71,11 +71,18 @@ public class ExpandCaptionsHook {
 
     private static List<Method> find(DexKitBridge bridge) {
         try {
-            for (MethodData md : bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
-                    .usingStrings(" [...]").paramCount(7)))) {
-                Method b = md.getMethodInstance(Module.hostClassLoader);
-                if (!Modifier.isStatic(b.getModifiers()) || b.getReturnType() == void.class) continue;
-                for (MethodData inv : md.getInvokes()) {
+            // The caption builder's parameter count changes between Instagram builds.
+            // Keep the stable truncation-string anchor and validate the invoked helper's
+            // full signature instead of hardcoding a seven-argument builder.
+            List<MethodData> candidates = bridge.findMethod(FindMethod.create()
+                    .matcher(MethodMatcher.create().usingStrings(" [...]")));
+            int eligible = 0;
+            for (MethodData md : candidates) {
+                try {
+                    Method b = md.getMethodInstance(Module.hostClassLoader);
+                    if (!Modifier.isStatic(b.getModifiers()) || b.getReturnType() == void.class) continue;
+                    eligible++;
+                    for (MethodData inv : md.getInvokes()) {
                     try {
                         if (!inv.isMethod()) continue;
                         Method h = inv.getMethodInstance(Module.hostClassLoader);
@@ -89,9 +96,11 @@ public class ExpandCaptionsHook {
                             return out;
                         }
                     } catch (Throwable ignored) {}
-                }
+                    }
+                } catch (Throwable ignored) {}
             }
-            ModuleLog.line(TAG + "❌ caption builder / truncation helper not found");
+            ModuleLog.line(TAG + "❌ caption builder / truncation helper not found"
+                    + " (anchor methods=" + candidates.size() + ", static builders=" + eligible + ")");
         } catch (Throwable t) {
             ModuleLog.line(TAG + "❌ " + t);
         }
