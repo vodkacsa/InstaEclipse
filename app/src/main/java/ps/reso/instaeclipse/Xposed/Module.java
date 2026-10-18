@@ -735,7 +735,7 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
                     // Custom profile picture viewer and circular-crop fixes.
                     try {
-                        if (!skip("PfpViewerRepair")) ps.reso.instaeclipse.mods.profile.PfpViewerRepair.install(lpparam.classLoader);
+                        if (!skip("PfpViewerRepair")) ps.reso.instaeclipse.mods.profile.PfpViewerRepair.install(dexKitBridge, lpparam.classLoader);
                     } catch (Throwable t) {
                         ModuleLog.line("(InstaEclipse | PfpViewerRepair): ❌ " + t);
                     }
