@@ -45,6 +45,7 @@ public class UIHookManager {
 
     // Cold-cache DexKit initialization is asynchronous. Delay the feature toast until done.
     private static volatile boolean featureHooksInstalled;
+    private static final Handler FEATURE_TOAST_HANDLER = new Handler(Looper.getMainLooper());
 
     public static Activity getCurrentActivity() {
         return currentActivity;
@@ -52,7 +53,7 @@ public class UIHookManager {
 
     public static void onFeatureHooksInstalled() {
         featureHooksInstalled = true;
-        mainHandler.post(() -> {
+        FEATURE_TOAST_HANDLER.post(() -> {
             Activity activity = currentActivity;
             if (activity != null) showFeatureToastIfReady(activity);
         });
@@ -63,7 +64,7 @@ public class UIHookManager {
     public static void onAppActivityResumed(Activity activity) {
         if (activity == null || !INSTAGRAM_MAIN_ACTIVITY.equals(activity.getClass().getName())) return;
         currentActivity = activity;
-        mainHandler.postDelayed(() -> showFeatureToastIfReady(activity), 1500);
+        FEATURE_TOAST_HANDLER.postDelayed(() -> showFeatureToastIfReady(activity), 1500);
     }
 
     private static void showFeatureToastIfReady(Activity activity) {
