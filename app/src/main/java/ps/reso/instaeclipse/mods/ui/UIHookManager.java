@@ -41,9 +41,46 @@ public class UIHookManager {
     private static final String INSTAGRAM_MAIN_ACTIVITY = "com.instagram.mainactivity.InstagramMainActivity";
 
     @SuppressLint("StaticFieldLeak")
-    private static Activity currentActivity;
+    private static volatile Activity currentActivity;
+
+    // Cold-cache DexKit initialization is asynchronous. Delay the feature toast until done.
+    private static volatile boolean featureHooksInstalled;
+    private static final Handler FEATURE_TOAST_HANDLER = new Handler(Looper.getMainLooper());
+
     public static Activity getCurrentActivity() {
         return currentActivity;
+    }
+
+    public static void onFeatureHooksInstalled() {
+        featureHooksInstalled = true;
+        FEATURE_TOAST_HANDLER.post(() -> {
+            Activity activity = currentActivity;
+            if (activity != null) showFeatureToastIfReady(activity);
+        });
+    }
+
+    // The activity lifecycle callback works even when the cold-cache background pass
+    // installed InstagramMainActivity hooks after its onCreate had already fired.
+    public static void onAppActivityResumed(Activity activity) {
+        if (activity == null || !INSTAGRAM_MAIN_ACTIVITY.equals(activity.getClass().getName())) return;
+        currentActivity = activity;
+        FEATURE_TOAST_HANDLER.postDelayed(() -> showFeatureToastIfReady(activity), 1500);
+    }
+
+    private static void showFeatureToastIfReady(Activity activity) {
+        if (!featureHooksInstalled || !FeatureFlags.showFeatureToasts
+                || CustomToast.toastShown || activity == null
+                || activity.isFinishing() || activity.isDestroyed()) return;
+
+        java.util.LinkedHashMap<String, Boolean> status = FeatureStatusTracker.snapshotStatus();
+        if (status.isEmpty()) return;
+
+        CustomToast.toastShown = true;
+        int installed = 0;
+        for (Boolean value : status.values()) if (Boolean.TRUE.equals(value)) installed++;
+        ModuleLog.line("(IE|FeatureToast) final hook status: " + installed + "/" + status.size());
+        CustomToast.showFeatureGrid(activity.getApplicationContext(),
+                I18n.t(activity, R.string.ig_toast_features_loaded), status);
     }
 
     /** Activity to show our dialogs on: the one {@code ctx} belongs to (posts, stories and
@@ -254,17 +291,8 @@ public class UIHookManager {
                         // Add the Ghost Emoji next to Inbox
                         addGhostEmojiNextToInbox(activity, GhostModeUtils.isGhostModeActive());
 
-                        // 3. Show Success Toast
-                        if (FeatureFlags.showFeatureToasts && !CustomToast.toastShown) {
-                            CustomToast.toastShown = true;
-
-                            // Pass the raw KEY -> hooked map; showFeatureGrid resolves
-                            // each key's label and groups it into a category itself.
-                            java.util.LinkedHashMap<String, Boolean> status =
-                                    new java.util.LinkedHashMap<>(FeatureStatusTracker.getStatus());
-                            CustomToast.showFeatureGrid(activity.getApplicationContext(),
-                                    I18n.t(activity, R.string.ig_toast_features_loaded), status);
-                        }
+                        // Do not snapshot status while DexKit is still resolving hooks.
+                        showFeatureToastIfReady(activity);
                     } catch (Exception innerE) {
                         ModuleLog.line("(InstaEclipse): UI Injection Error: " + innerE.getMessage());
                     }
