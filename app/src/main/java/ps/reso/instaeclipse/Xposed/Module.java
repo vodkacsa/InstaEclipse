@@ -209,6 +209,8 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 new android.app.Application.ActivityLifecycleCallbacks() {
                                     @Override public void onActivityResumed(android.app.Activity a) {
                                         ps.reso.instaeclipse.utils.core.CompanionSync.pullAsync(a);
+                                        // Track MainActivity before its dynamic hooks are installed.
+                                        UIHookManager.onAppActivityResumed(a);
                                     }
                                     @Override public void onActivityCreated(android.app.Activity a, Bundle b) {}
                                     @Override public void onActivityStarted(android.app.Activity a) {}
@@ -761,8 +763,10 @@ public class Module implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         ModuleLog.line("(InstaEclipse | ExecGuard): ❌ Failed to hook");
                     }
 
-                    // Every lookup is cached now: later launches install inline.
+                    // The feature grid must reflect all completed hook installations.
+                    // The first (cache-cleared) launch can take tens of seconds here.
                     DexKitCache.saveString(CACHE_COMPLETE_KEY, "1");
+                    UIHookManager.onFeatureHooksInstalled();
                     };
 
                     if (DexKitCache.isCacheValid() && "1".equals(DexKitCache.loadString(CACHE_COMPLETE_KEY))) {
