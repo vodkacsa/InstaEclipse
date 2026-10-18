@@ -71,6 +71,14 @@ public class FeatureStatusTracker {
         return features;
     }
 
+    /** Copy under the synchronized map's monitor. Async DexKit updates must not
+     * race against iterating its entries to build the load-toast checklist. */
+    public static java.util.LinkedHashMap<String, Boolean> snapshotStatus() {
+        synchronized (features) {
+            return new java.util.LinkedHashMap<>(features);
+        }
+    }
+
     public static boolean hasEnabledFeatures() {
         return !features.isEmpty();
     }
