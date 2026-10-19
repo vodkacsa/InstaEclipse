@@ -15,8 +15,8 @@ import org.luckypray.dexkit.result.MethodData;
 
 import ps.reso.instaeclipse.utils.log.ModuleLog;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
+import ps.reso.instaeclipse.xposedcompat.XC_MethodHook;
+import ps.reso.instaeclipse.xposedcompat.XposedBridge;
 
 /**
  * Repairs the native expanded-profile-picture viewer when UserDetailFragment
