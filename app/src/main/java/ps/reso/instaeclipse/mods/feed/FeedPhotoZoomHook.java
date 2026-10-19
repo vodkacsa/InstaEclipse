@@ -14,9 +14,12 @@ import android.view.ViewParent;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.ImageView;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedHelpers;
+import ps.reso.instaeclipse.xposedcompat.XC_MethodHook;
+import ps.reso.instaeclipse.xposedcompat.XposedBridge;
+import ps.reso.instaeclipse.xposedcompat.XposedHelpers;
 import ps.reso.instaeclipse.utils.feature.FeatureFlags;
 import ps.reso.instaeclipse.utils.feature.FeatureStatusTracker;
 import ps.reso.instaeclipse.utils.log.ModuleLog;
@@ -34,8 +37,7 @@ public class FeedPhotoZoomHook {
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     // IG 448+ moved the view to common.ui.widget.imageview; the legacy feed.widget name is kept
-    // as a fallback for older builds. onAttachedToWindow may be inherited, rather than
-    // declared on IgProgressImageView itself.
+    // as a fallback for older builds. Same API in both (onAttachedToWindow + getIgImageView).
     private static final String[] VIEW_CLASSES = {
             "com.instagram.common.ui.widget.imageview.IgProgressImageView",
             "com.instagram.feed.widget.IgProgressImageView",
@@ -49,41 +51,20 @@ public class FeedPhotoZoomHook {
 
     public void install(ClassLoader classLoader) {
         try {
-            Class<?> viewClass = null;
-            for (String name : VIEW_CLASSES) {
-                try {
-                    viewClass = classLoader.loadClass(name);
-                    break;
-                } catch (ClassNotFoundException ignored) {
-                }
-            }
-            if (viewClass == null) {
-                ModuleLog.line("(IE|PhotoZoom) ❌ IgProgressImageView not found");
+            ViewBinding binding = ViewBinding.resolve(classLoader, VIEW_CLASSES);
+            if (binding == null) {
+                ModuleLog.line("(IE|PhotoZoom) compatible image wrapper not found");
+                if (FeatureFlags.enablePhotoZoom) FeatureStatusTracker.setBroken("PhotoZoom");
                 return;
             }
 
-            // Hook the first declaration in the hierarchy. XposedHelpers.findAndHookMethod
-            // only accepts methods declared on the given class; IG 452+ inherits this one,
-            // so an exact lookup on IgProgressImageView throws NoSuchMethodError.
-            Class<?> targetViewClass = viewClass;
-            java.lang.reflect.Method attach = null;
-            for (Class<?> cursor = viewClass; cursor != null; cursor = cursor.getSuperclass()) {
-                try {
-                    attach = cursor.getDeclaredMethod("onAttachedToWindow");
-                    break;
-                } catch (NoSuchMethodException ignored) {}
-            }
-            if (attach == null) {
-                ModuleLog.line("(IE|PhotoZoom) ❌ no onAttachedToWindow in view hierarchy");
-                return;
-            }
-            final String attachOwner = attach.getDeclaringClass().getName();
-            de.robv.android.xposed.XposedBridge.hookMethod(attach, new XC_MethodHook() {
+            // Hooked at onAttachedToWindow, not the constructor: the view has no parent yet
+            // at construction time, so the feed-row ancestor check below would always fail.
+            XposedBridge.hookMethod(binding.attach, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    // An inherited method can be shared by other image and framework views.
-                    // Never change their long-click behavior or touch dispatch.
-                    if (!targetViewClass.isInstance(param.thisObject) || !FeatureFlags.enablePhotoZoom) return;
+                    // An inherited attach method is shared by unrelated views.
+                    if (!binding.viewClass.isInstance(param.thisObject)) return;
                     ps.reso.instaeclipse.utils.core.JitGuard.tick(param.method);
                     // setOnLongClickListener() has a side effect beyond registering the
                     // callback: it also flips the view's LONG_CLICKABLE flag, which changes
@@ -95,13 +76,14 @@ public class FeedPhotoZoomHook {
                     // story-advance and DM media opens. Gate on BOTH the feature flag and a
                     // feed-row identity check BEFORE attaching, not just inside the callback,
                     // so the flag is left untouched everywhere else.
+                    if (!FeatureFlags.enablePhotoZoom) return;
                     try {
                         View view = (View) param.thisObject;
                         if (!isInsideFeedRow(view)) return;
                         view.setOnLongClickListener(v -> {
-                            if (!FeatureFlags.enablePhotoZoom) return false;
+                            if (!FeatureFlags.enablePhotoZoom || !isInsideFeedRow(v)) return false;
                             try {
-                                Object imgViewObj = XposedHelpers.callMethod(param.thisObject, "getIgImageView");
+                                Object imgViewObj = binding.image.invoke(v);
                                 if (!(imgViewObj instanceof ImageView)) return false;
                                 Bitmap snapshot = viewToBitmap((ImageView) imgViewObj);
                                 if (snapshot == null) return false;
@@ -119,10 +101,51 @@ public class FeedPhotoZoomHook {
             });
 
             FeatureStatusTracker.setHooked("PhotoZoom");
-            ModuleLog.line("(IE|PhotoZoom) ✅ hook installed on " + attachOwner
-                    + " (filtered to " + targetViewClass.getName() + ")");
+            ModuleLog.line("(IE|PhotoZoom) ✅ hook installed on " + binding.attach.getDeclaringClass().getName());
         } catch (Throwable t) {
             ModuleLog.line("(IE|PhotoZoom) ❌ install: " + t);
+            if (FeatureFlags.enablePhotoZoom) FeatureStatusTracker.setBroken("PhotoZoom");
+        }
+    }
+
+    /** Resolve a typed child and an owned lifecycle before changing any host listener. */
+    static final class ViewBinding {
+        final Method attach;
+        final Method image;
+        final Class<?> viewClass;
+
+        private ViewBinding(Method attach, Method image, Class<?> viewClass) {
+            this.attach = attach;
+            this.image = image;
+            this.viewClass = viewClass;
+        }
+
+        static ViewBinding resolve(ClassLoader loader, String... names) {
+            for (String name : names) {
+                try {
+                    Class<?> type = loader.loadClass(name);
+                    if (!ViewGroup.class.isAssignableFrom(type)) continue;
+                    Method attach = null;
+                    for (Class<?> cls = type; cls != null; cls = cls.getSuperclass()) {
+                        try {
+                            attach = cls.getDeclaredMethod("onAttachedToWindow");
+                            break;
+                        } catch (NoSuchMethodException ignored) {}
+                    }
+                    if (attach == null) continue;
+                    Method image = type.getMethod("getIgImageView");
+                    if (attach.getReturnType() != void.class
+                            || Modifier.isStatic(attach.getModifiers())
+                            || Modifier.isAbstract(attach.getModifiers())
+                            || Modifier.isStatic(image.getModifiers())
+                            || !ImageView.class.isAssignableFrom(image.getReturnType())) continue;
+                    attach.setAccessible(true);
+                    image.setAccessible(true);
+                    return new ViewBinding(attach, image, type);
+                } catch (ReflectiveOperationException | LinkageError ignored) {
+                }
+            }
+            return null;
         }
     }
 
