@@ -133,6 +133,13 @@ public class FeedPhotoZoomHook {
                         } catch (NoSuchMethodException ignored) {}
                     }
                     if (attach == null) continue;
+                    // Never hook an inherited Android/platform lifecycle method. Allow
+                    // renamed Instagram wrappers to share their own declared lifecycle
+                    // while filtering the callback to the exact target view type.
+                    if (attach.getDeclaringClass() != type
+                            && !(type.getName().startsWith("com.instagram.")
+                                    && attach.getDeclaringClass().getName().startsWith("com.instagram.")))
+                        continue;
                     Method image = type.getMethod("getIgImageView");
                     if (attach.getReturnType() != void.class
                             || Modifier.isStatic(attach.getModifiers())
